@@ -24,7 +24,7 @@ const { useState, useEffect, useCallback, useRef } = React;
 const COLORS = {
   bg: '#0e1116', card: '#161b22', cardRaised: '#1c2229',
   border: 'rgba(255,255,255,0.08)', gold: '#d4a24c', goldDim: '#8a6b32',
-  up: '#ff5252', down: '#2ecc71', blue: '#4da6ff', pink: '#ff85d1', orange: '#ffab5c',
+  up: '#ff5252', down: '#2ecc71', blue: '#4da6ff', pink: '#ff85d1', orange: '#ffab5c', yellow: '#ffd23f',
   textPrimary: '#e8e6e0', textSecondary: '#9099a8', textMuted: '#5f6672',
 };
 
@@ -1025,7 +1025,7 @@ function StockAnalyzer() {
               {result.announcements.map((a, i) => (
                 <div key={i} style={{ fontSize: 12, marginBottom: i < result.announcements.length - 1 ? 6 : 0, lineHeight: 1.5 }}>
                   <span style={{ color: COLORS.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>{a.date}</span>{' '}
-                  <span>{a.subject}</span>
+                  <span style={{ color: COLORS.yellow }}>{a.subject}</span>
                 </div>
               ))}
               <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※資料來源:公開資訊觀測站,依法公開揭露之重大訊息,非即時新聞、非內線消息</div>
