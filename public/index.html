@@ -286,6 +286,26 @@ async function fetchStock(code) {
   }
 }
 
+async function logSearch(code, isGuest) {
+  try {
+    await fetch(`${PROXY_BASE}/api/log-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, isGuest }),
+    });
+  } catch (e) { /* 記錄失敗不影響主功能 */ }
+}
+
+async function fetchAdminLogs() {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/admin/logs?user=${VALID_USERNAME}&pass=${VALID_PASSWORD}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchInstitutional(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/institutional/${code}`);
@@ -610,7 +630,7 @@ const VALID_USERNAME = '1111';
 const VALID_PASSWORD = '5168';
 const GUEST_SEARCH_LIMIT = 10;
 
-function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount }) {
+function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount, onShowLogs }) {
   const [showForm, setShowForm] = useState(false);
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
@@ -632,6 +652,10 @@ function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount }) {
       {isLoggedIn ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
           <span style={{ color: COLORS.up }}>● 已登入</span>
+          <button onClick={onShowLogs} style={{
+            background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
+            borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+          }}>查看記錄</button>
           <button onClick={onLogout} style={{
             background: 'transparent', border: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted,
             borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
@@ -678,6 +702,9 @@ function StockAnalyzer() {
   const [now, setNow] = useState(new Date());
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [guestCount, setGuestCount] = useState(0);
+  const [showLogs, setShowLogs] = useState(false);
+  const [adminLogs, setAdminLogs] = useState(null);
+  const [logsLoading, setLogsLoading] = useState(false);
   const nameMapRef = useRef(null);
 
   useEffect(() => {
@@ -691,6 +718,13 @@ function StockAnalyzer() {
       setGuestCount(getGuestCountToday());
     } catch (e) { /* ignore */ }
   }, []);
+
+  const loadAdminLogs = async () => {
+    setLogsLoading(true);
+    const data = await fetchAdminLogs();
+    setLogsLoading(false);
+    setAdminLogs(data);
+  };
 
   const handleLogin = () => {
     setIsLoggedIn(true);
@@ -745,6 +779,7 @@ function StockAnalyzer() {
     if (!chineseName) chineseName = data.name;
     setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak });
     setUpdatedAt(new Date());
+    logSearch(cleaned, !isLoggedIn);
 
     if (!isLoggedIn && isTradingWindow()) {
       try {
@@ -766,7 +801,8 @@ function StockAnalyzer() {
 
   return (
     <div style={{ background: COLORS.bg, minHeight: '100vh', padding: '20px 16px 40px', fontFamily: "'Noto Sans TC', sans-serif", color: COLORS.textPrimary, position: 'relative' }}>
-      <LoginBadge isLoggedIn={isLoggedIn} onLogin={handleLogin} onLogout={handleLogout} guestCount={guestCount} />
+      <LoginBadge isLoggedIn={isLoggedIn} onLogin={handleLogin} onLogout={handleLogout} guestCount={guestCount}
+        onShowLogs={() => { setShowLogs(!showLogs); if (!showLogs) loadAdminLogs(); }} />
       <div style={{ textAlign: 'center', marginBottom: 20 }}>
         <div style={{ fontFamily: "'Noto Serif TC', serif", fontSize: 22, fontWeight: 700, color: COLORS.gold, letterSpacing: 1 }}>台股即時分析</div>
         <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>
@@ -799,6 +835,37 @@ function StockAnalyzer() {
           }}
         >查詢</button>
       </div>
+
+      {showLogs && isLoggedIn && (
+        <div style={{ background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 12, padding: 14, marginBottom: 16, fontSize: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, color: COLORS.gold }}>訪客/會員搜尋記錄</div>
+            <button onClick={loadAdminLogs} style={{
+              background: 'transparent', border: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted,
+              borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+            }}>重新整理</button>
+          </div>
+          {logsLoading && <div style={{ color: COLORS.textMuted }}>載入中...</div>}
+          {!logsLoading && adminLogs && adminLogs.logs && (
+            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+              {adminLogs.logs.length === 0 && <div style={{ color: COLORS.textMuted }}>目前沒有記錄</div>}
+              {adminLogs.logs.map((log, i) => (
+                <div key={i} style={{
+                  display: 'flex', justifyContent: 'space-between', padding: '5px 0',
+                  borderBottom: i < adminLogs.logs.length - 1 ? `0.5px solid ${COLORS.border}` : 'none',
+                }}>
+                  <span style={{ color: COLORS.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {new Date(log.time).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}
+                  </span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{log.code}</span>
+                  <span style={{ color: log.type === '訪客' ? COLORS.orange : COLORS.up }}>{log.type}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 8 }}>{adminLogs.note}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {watchlist.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
