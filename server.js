@@ -13,8 +13,11 @@ app.use(cors()); // 允許任何來源呼叫這台代理伺服器(給手機App�
 
 const PORT = process.env.PORT || 3000;
 
+// ---------- 直接提供網頁本身(打開這個伺服器的網址就能看到App,不用再下載檔案) ----------
+app.use(express.static('public'));
+
 // ---------- 健康檢查(確認伺服器有正常運作) ----------
-app.get('/', (req, res) => {
+app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: '台股代理伺服器運作中' });
 });
 
