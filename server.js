@@ -71,6 +71,85 @@ app.get('/api/twse/snapshot', async (req, res) => {
   }
 });
 
+// ---------- 上櫃股票名稱備援查詢(上市快照查不到時使用,自動偵測UTF8/Big5編碼) ----------
+// 用法: GET /api/otc-name/6213
+app.get('/api/otc-name/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = `http://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=otc_${code}.tw`;
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const buffer = Buffer.from(await response.arrayBuffer());
+    let text;
+    try {
+      text = buffer.toString('utf8');
+      if (text.includes('\uFFFD')) throw new Error('not utf8');
+    } catch (e) {
+      text = iconv.decode(buffer, 'big5');
+    }
+    const json = JSON.parse(text);
+    const item = json?.msgArray?.[0];
+    const name = item?.nf || item?.n || null;
+    return res.json({ code, name });
+  } catch (e) {
+    return res.json({ code, name: null });
+  }
+});
+
+// ---------- 股利分派情形(官方僅提供董事會決議股利分派日,非最終除息交易日) ----------
+app.get('/api/dividend/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://openapi.twse.com.tw/v1/opendata/t187ap45_L';
+    const response = await fetch(url);
+    const json = await response.json();
+    const row = json.find((r) => r['公司代號'] === code);
+    if (!row) return res.json({ code, dividend: null });
+    return res.json({
+      code,
+      dividend: {
+        year: row['股利年度'] || null,
+        boardDate: row['董事會擬議股利分派日'] || row['股東常會日期'] || null,
+        progress: row['股利決議層級'] || row['決議層級'] || null,
+      },
+    });
+  } catch (e) {
+    return res.json({ code, dividend: null });
+  }
+});
+
+// ---------- 處置股警示(公布處置有價證券,含處置起迄日期) ----------
+app.get('/api/disposition/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://www.twse.com.tw/announcement/punish?response=json';
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const json = await response.json();
+    if (json.stat !== 'OK' || !json.data) return res.json({ code, disposition: null });
+
+    const fields = json.fields;
+    const idxCode = fields.indexOf('證券代號');
+    const idxDate = fields.indexOf('公布日期');
+    const idxPeriod = fields.indexOf('處置起迄時間');
+    const idxMeasure = fields.indexOf('處置措施');
+    const idxCount = fields.indexOf('累計');
+    if (idxCode < 0) return res.json({ code, disposition: null });
+
+    const row = json.data.find((r) => (r[idxCode] || '').trim() === code);
+    if (!row) return res.json({ code, disposition: null });
+    return res.json({
+      code,
+      disposition: {
+        announceDate: idxDate >= 0 ? row[idxDate] : null,
+        period: idxPeriod >= 0 ? row[idxPeriod] : null,
+        measure: idxMeasure >= 0 ? row[idxMeasure] : null,
+        count: idxCount >= 0 ? row[idxCount] : null,
+      },
+    });
+  } catch (e) {
+    return res.json({ code, disposition: null });
+  }
+});
+
 // ---------- 融資餘額增減(散戶動向替代指標,官方CSV為Big5編碼,此處代為解碼轉發) ----------
 // 用法: GET /api/margin/2330
 app.get('/api/margin/:code', async (req, res) => {
