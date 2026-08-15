@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>台股即時分析</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@700&family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #0e1116; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const COLORS = {
+  bg: '#0e1116', card: '#161b22', cardRaised: '#1c2229',
+  border: 'rgba(255,255,255,0.08)', gold: '#d4a24c', goldDim: '#8a6b32',
+  up: '#ff5252', down: '#2ecc71', blue: '#4da6ff', pink: '#ff85d1', orange: '#ffab5c', yellow: '#ffd23f',
+  textPrimary: '#e8e6e0', textSecondary: '#9099a8', textMuted: '#5f6672',
+};
+
+// ================= 技術指標計算(與PowerShell報告邏輯一致) =================
+
+function sma(values, period) {
+  if (values.length < period) return null;
+  const slice = values.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+function computeKD(closes, highs, lows, period = 9) {
+  const n = closes.length;
+  if (n < period) return null;
+  let K = 50, D = 50;
+  const kHistory = [];
+  for (let i = period - 1; i < n; i++) {
+    const hh = Math.max(...highs.slice(i - period + 1, i + 1));
+    const ll = Math.min(...lows.slice(i - period + 1, i + 1));
+    const rsv = hh === ll ? 50 : ((closes[i] - ll) / (hh - ll)) * 100;
+    K = (K * 2 + rsv) / 3;
+    D = (D * 2 + K) / 3;
+    kHistory.push(K);
+  }
+  return { K: +K.toFixed(2), D: +D.toFixed(2), recentK: kHistory.slice(-3) };
+}
+
+function computeRSI(closes, period = 14) {
+  const n = closes.length;
+  if (n < period + 1) return null;
+  const gains = [], losses = [];
+  for (let i = 1; i < n; i++) {
+    const diff = closes[i] - closes[i - 1];
+    gains.push(diff > 0 ? diff : 0);
+    losses.push(diff < 0 ? -diff : 0);
+  }
+  let avgGain = gains.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  let avgLoss = losses.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < gains.length; i++) {
+    avgGain = (avgGain * (period - 1) + gains[i]) / period;
+    avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
+  }
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return +(100 - 100 / (1 + rs)).toFixed(1);
+}
+
+function ema(values, period) {
+  if (values.length < period) return null;
+  const k = 2 / (period + 1);
+  let e = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < values.length; i++) e = values[i] * k + e * (1 - k);
+  return e;
+}
+
+function computeMACD(closes) {
+  if (closes.length < 35) return null;
+  const series = [];
+  for (let i = 26; i <= closes.length; i++) {
+    const slice = closes.slice(0, i);
+    const e12 = ema(slice, 12), e26 = ema(slice, 26);
+    if (e12 != null && e26 != null) series.push(e12 - e26);
+  }
+  if (series.length < 9) return null;
+  const signal = ema(series, 9);
+  const macd = series[series.length - 1];
+  const cross = macd > signal ? 'MACD在訊號線上方(偏多)' : 'MACD在訊號線下方(偏空)';
+  return { macd: +macd.toFixed(2), signal: +signal.toFixed(2), hist: +(macd - signal).toFixed(2), crossText: cross };
+}
+
+function computeATR(closes, highs, lows, period = 14) {
+  const n = closes.length;
+  if (n < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < n; i++) {
+    const tr = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+    trs.push(tr);
+  }
+  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+}
+
+function computeBias(lastPrice, ma20) {
+  if (!ma20) return null;
+  const bias = +(((lastPrice - ma20) / ma20) * 100).toFixed(2);
+  let warning = '';
+  if (bias > 15) warning = '⚠️追高風險高(乖離過大)';
+  else if (bias > 8) warning = '短線漲多,留意拉回';
+  else if (bias >= -5 && bias < 5) warning = '相對安全,乖離不大';
+  return { bias, warning };
+}
+
+function computeUpDays(closes, lookback = 5) {
+  if (closes.length < lookback + 1) return null;
+  let upDays = 0;
+  for (let i = closes.length - lookback; i < closes.length; i++) {
+    if (closes[i] > closes[i - 1]) upDays++;
+  }
+  let label = `近5日漲${upDays}天`;
+  if (upDays >= 4) label += '(已連漲多日,追高風險較高)';
+  else if (upDays <= 1) label += '(可能為打底後首次突破)';
+  return { upDays, label };
+}
+
+function computeVolTrend(volumes) {
+  if (!volumes || volumes.length < 20) return '資料不足';
+  const recent = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+  const prior = volumes.slice(-20, -5).reduce((a, b) => a + b, 0) / 15;
+  if (prior <= 0) return '資料不足';
+  if (recent > prior * 1.2) return '近期量增';
+  if (recent < prior * 0.8) return '近期量縮';
+  return '量能持平';
+}
+
+function computeVolumeRatio(volumes) {
+  if (!volumes || volumes.length < 6) return null;
+  const today = volumes[volumes.length - 1];
+  const avg5 = volumes.slice(-6, -1).reduce((a, b) => a + b, 0) / 5;
+  if (avg5 <= 0) return null;
+  return +(today / avg5).toFixed(2);
+}
+
+function computeVolumeDivergence(dayChangePct, volTrend) {
+  if (dayChangePct == null || !volTrend) return null;
+  if (dayChangePct > 0 && volTrend === '近期量縮') return { text: '⚠️價漲量縮,上漲力道存疑,留意是否為假突破', color: COLORS.orange };
+  if (dayChangePct < 0 && volTrend === '近期量增') return { text: '⚠️價跌量增,賣壓沉重', color: COLORS.orange };
+  if (dayChangePct > 0 && volTrend === '近期量增') return { text: '價漲量增,買盤積極,訊號品質較佳', color: COLORS.up };
+  return null;
+}
+
+function computeCrossInfo(closes) {
+  if (closes.length < 21) return null;
+  const last4 = closes.slice(-4);
+  const sum4 = last4.reduce((a, b) => a + b, 0);
+  const last19 = closes.slice(-19);
+  const sum19 = last19.reduce((a, b) => a + b, 0);
+  const crossPrice = +((5 * sum19 - 20 * sum4) / 15).toFixed(2);
+
+  const closesYesterday = closes.slice(0, -1);
+  const ma5Y = sma(closesYesterday, 5);
+  const ma20Y = sma(closesYesterday, 20);
+  const ma5 = sma(closes, 5);
+  const ma20 = sma(closes, 20);
+  if (ma5 == null || ma20 == null) return null;
+
+  let direction = '資料不足';
+  if (ma5Y != null && ma20Y != null) {
+    const spreadToday = ma5 - ma20;
+    const spreadYesterday = ma5Y - ma20Y;
+    if (spreadToday > spreadYesterday) direction = '往上發展(遠離死亡交叉/偏多增強)';
+    else if (spreadToday < spreadYesterday) direction = '往下發展(逼近死亡交叉/偏空增強)';
+    else direction = '持平';
+  }
+
+  const statusText = ma5 > ma20
+    ? `黃金排列(MA5在上),跌破 ${crossPrice} 元將觸發死亡交叉`
+    : `死亡排列(MA5在下),站上 ${crossPrice} 元將觸發黃金交叉`;
+
+  return { crossPrice, direction, statusText };
+}
+
+function computeStopLoss(closes, highs, lows, lastPrice) {
+  if (closes.length < 21) return null;
+  const ma20 = sma(closes, 20);
+  const recentLow20 = Math.min(...lows.slice(-20));
+  const atr = computeATR(closes, highs, lows, 14);
+  const atrStop = atr ? +(lastPrice - 2 * atr).toFixed(2) : null;
+
+  const levels = [];
+  if (ma20) levels.push({ label: 'MA20月線', value: +ma20.toFixed(2) });
+  if (recentLow20) levels.push({ label: '近20日低點', value: +recentLow20.toFixed(2) });
+  if (atrStop) levels.push({ label: '2倍ATR波動停損', value: atrStop });
+  if (levels.length === 0) return null;
+
+  const below = levels.filter(l => l.value < lastPrice).sort((a, b) => b.value - a.value);
+  const primary = below.length ? below[0] : [...levels].sort((a, b) => a.value - b.value)[0];
+  const detailText = levels.map(l => `${l.label}:${l.value}`).join('、');
+  const lossPct = +(((lastPrice - primary.value) / lastPrice) * 100).toFixed(2);
+
+  return { price: primary.value, basis: primary.label, lossPct, detailText };
+}
+
+function computeTomorrowOutlook(ma5, ma20, kd, closes) {
+  if (ma5 == null || ma20 == null || !kd) return null;
+  const recentK = kd.recentK || [];
+  let kMomentum = '持平';
+  if (recentK.length >= 3) {
+    if (recentK[2] > recentK[1] && recentK[1] > recentK[0]) kMomentum = '增強';
+    else if (recentK[2] < recentK[1] && recentK[1] < recentK[0]) kMomentum = '減弱';
+  }
+  let priceMomentum = '持平';
+  if (closes.length >= 4) {
+    const diffs = [];
+    for (let j = closes.length - 3; j < closes.length; j++) diffs.push(closes[j] - closes[j - 1]);
+    const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    if (avgDiff > 0) priceMomentum = '上升';
+    else if (avgDiff < 0) priceMomentum = '下降';
+  }
+  let score = 0;
+  score += ma5 > ma20 ? 1 : -1;
+  score += kd.K > kd.D ? 1 : -1;
+  if (kMomentum === '增強') score++; else if (kMomentum === '減弱') score--;
+  if (priceMomentum === '上升') score++; else if (priceMomentum === '下降') score--;
+
+  const outlook = score >= 2 ? '偏多機率較高' : score <= -2 ? '偏空機率較高' : '方向不明,建議觀望';
+  return `明日推測:${outlook}(KD動能:${kMomentum},短期價格動能:${priceMomentum})※僅為技術指標簡單推算,非保證,僅供參考`;
+}
+
+function analyze(closes, highs, lows, volumes) {
+  const n = closes.length;
+  const last = closes[n - 1];
+  const prev = closes[n - 2];
+  const dayChangePct = prev ? ((last - prev) / prev) * 100 : null;
+
+  const ma5 = sma(closes, 5);
+  const ma20 = sma(closes, 20);
+  const kd = computeKD(closes, highs, lows, 9);
+  const rsi = computeRSI(closes, 14);
+  const macd = computeMACD(closes);
+  const biasInfo = computeBias(last, ma20);
+  const upDaysInfo = computeUpDays(closes, 5);
+  const volTrend = computeVolTrend(volumes);
+  const volRatio = computeVolumeRatio(volumes);
+  const volumeDivergence = computeVolumeDivergence(dayChangePct, volTrend);
+  const crossInfo = computeCrossInfo(closes);
+  const stopLoss = computeStopLoss(closes, highs, lows, last);
+  const tomorrowOutlook = computeTomorrowOutlook(ma5, ma20, kd, closes);
+
+  let conclusion = '資料不足', score = 0;
+  if (ma5 != null && ma20 != null && kd) {
+    let bull = 0;
+    if (ma5 > ma20) bull++;
+    if (kd.K > kd.D) bull++;
+    conclusion = bull === 2 ? '偏多 ↑' : bull === 0 ? '偏空 ↓' : '中性/觀望 →';
+    score = bull === 2 ? 1 : bull === 0 ? -1 : 0;
+  }
+
+  const todayVolZhang = volumes && volumes.length ? Math.round(volumes[volumes.length - 1] / 1000) : null;
+
+  return {
+    last: +last.toFixed(2), dayChangePct, ma5, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
+    volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
+    conclusion, score, todayVolZhang,
+  };
+}
+
+// ================= 資料抓取 =================
+
+const PROXY_BASE = 'https://stock-proxy-server.onrender.com';
+
+async function fetchStock(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/stock/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.closes || data.closes.length === 0) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function logSearch(code, isGuest) {
+  try {
+    await fetch(`${PROXY_BASE}/api/log-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, isGuest }),
+    });
+  } catch (e) { /* 記錄失敗不影響主功能 */ }
+}
+
+async function fetchAdminLogs() {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/admin/logs?user=${VALID_USERNAME}&pass=${VALID_PASSWORD}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchInstitutional(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/institutional/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.flow;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getTaipeiDateStr() {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(new Date());
+}
+
+// 訪客搜尋次數:每天(以台北時區為準)自動重置
+function getGuestCountToday() {
+  const today = getTaipeiDateStr();
+  const storedDate = localStorage.getItem('tw_stock_guest_date');
+  if (storedDate !== today) {
+    localStorage.setItem('tw_stock_guest_date', today);
+    localStorage.setItem('tw_stock_guest_count', '0');
+    return 0;
+  }
+  return parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
+}
+
+function incrementGuestCount() {
+  const newCount = getGuestCountToday() + 1;
+  localStorage.setItem('tw_stock_guest_date', getTaipeiDateStr());
+  localStorage.setItem('tw_stock_guest_count', String(newCount));
+  return newCount;
+}
+
+// 判斷現在是否為台股交易時段(週一~週五 09:00-13:30,以台北時區為準)
+function isTradingWindow() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const weekday = parts.find(p => p.type === 'weekday').value; // Mon, Tue, ... Sun
+  const hh = +parts.find(p => p.type === 'hour').value;
+  const mm = +parts.find(p => p.type === 'minute').value;
+  const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+  const minutes = hh * 60 + mm;
+  const isTradingTime = minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
+  return isWeekday && isTradingTime;
+}
+
+function recordFlowHistory(code, flow) {
+  if (!flow) return;
+  try {
+    const key = 'tw_stock_flow_history';
+    const all = JSON.parse(localStorage.getItem(key) || '[]');
+    const today = getTaipeiDateStr();
+    // 若今天已經記錄過這檔股票,不重複記錄(避免同一天查詢多次造成資料失真)
+    if (all.some((r) => r.code === code && r.date === today)) return;
+    all.push({ date: today, code, ...flow });
+    // 只保留最近90筆同一檔股票的記錄,避免localStorage無限增長
+    const trimmed = all.filter((r) => r.code !== code).concat(
+      all.filter((r) => r.code === code).slice(-90)
+    );
+    localStorage.setItem(key, JSON.stringify(trimmed));
+  } catch (e) { /* ignore */ }
+}
+
+function getConsecutiveDays(code, field) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const rows = all.filter((r) => r.code === code).sort((a, b) => b.date.localeCompare(a.date));
+    if (rows.length === 0) return null;
+    const first = rows[0][field];
+    if (first === 0 || first == null) return { days: 0, direction: '持平' };
+    const direction = first > 0 ? '買超' : '賣超';
+    let count = 0;
+    for (const r of rows) {
+      const v = r[field];
+      if ((direction === '買超' && v > 0) || (direction === '賣超' && v < 0)) count++;
+      else break;
+    }
+    return { days: count, direction };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchMargin(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/margin/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.marginChange;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchOtcName(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/otc-name/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.name;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchDividend(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/dividend/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.dividend;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchDisposition(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/disposition/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.disposition;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchAnnouncements(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/announcements/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.announcements;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchIntraday(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/intraday/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.points || data.points.length === 0) return null;
+    // 只保留台股交易時段 09:00~13:30(以台北時區判斷,避免受裝置時區影響)
+    const filtered = data.points.filter((p) => {
+      const t = new Date(p.time * 1000);
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(t);
+      const hh = +parts.find((x) => x.type === 'hour').value;
+      const mm = +parts.find((x) => x.type === 'minute').value;
+      const minutes = hh * 60 + mm;
+      return minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
+    });
+    return filtered.length > 0 ? filtered : data.points;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchTwseNameMap() {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/twse/snapshot`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const map = {};
+    for (const row of json) { if (row.Code && row.Name) map[row.Code] = row.Name; }
+    return map;
+  } catch (e) {
+    return null;
+  }
+}
+
+// ================= UI元件 =================
+
+function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, code }) {
+  const priceBoxRef = React.useRef(null);
+  const volBoxRef = React.useRef(null);
+  const rsiBoxRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!opens || opens.length < 20 || !priceBoxRef.current) return;
+
+    // 將秒級timestamp轉為Lightweight Charts要求的 'yyyy-MM-dd' 字串(以台北時區判斷日期)
+    const toDateStr = (t) => {
+      const d = new Date(t * 1000);
+      return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(d); // sv-SE格式剛好是yyyy-MM-dd
+    };
+
+    const candleData = opens.map((o, i) => ({
+      time: toDateStr(timestamps[i]), open: o, high: highs[i], low: lows[i], close: closes[i],
+    }));
+    const volumeData = volumes.map((v, i) => ({
+      time: toDateStr(timestamps[i]), value: v,
+      color: closes[i] >= opens[i] ? 'rgba(255,82,82,0.6)' : 'rgba(46,204,113,0.6)',
+    }));
+
+    const smaLine = (period) => {
+      const out = [];
+      for (let i = period - 1; i < closes.length; i++) {
+        const avg = closes.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
+        out.push({ time: toDateStr(timestamps[i]), value: +avg.toFixed(2) });
+      }
+      return out;
+    };
+    const rsiLine = (() => {
+      const out = [];
+      const period = 14;
+      if (closes.length < period + 1) return out;
+      const gains = [], losses = [];
+      for (let i = 1; i < closes.length; i++) {
+        const diff = closes[i] - closes[i - 1];
+        gains.push(diff > 0 ? diff : 0);
+        losses.push(diff < 0 ? -diff : 0);
+      }
+      let avgGain = gains.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      let avgLoss = losses.slice(0, period).reduce((a, b) => a + b, 0) / period;
+      for (let i = period; i < gains.length; i++) {
+        avgGain = (avgGain * (period - 1) + gains[i]) / period;
+        avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
+        const rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+        out.push({ time: toDateStr(timestamps[i + 1]), value: +rsi.toFixed(1) });
+      }
+      return out;
+    })();
+
+    const commonOpts = {
+      layout: { background: { color: COLORS.card }, textColor: COLORS.textSecondary, fontFamily: "'JetBrains Mono', monospace" },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
+      timeScale: { borderColor: COLORS.border, timeVisible: false },
+      rightPriceScale: { borderColor: COLORS.border },
+      crosshair: { mode: 0 },
+      handleScroll: false, handleScale: false,
+    };
+
+    priceBoxRef.current.innerHTML = '';
+    const priceChart = LightweightCharts.createChart(priceBoxRef.current, { ...commonOpts, height: 220 });
+    const candleSeries = priceChart.addCandlestickSeries({
+      upColor: COLORS.up, downColor: COLORS.down, borderVisible: false,
+      wickUpColor: COLORS.up, wickDownColor: COLORS.down,
+    });
+    candleSeries.setData(candleData);
+    const ma5Series = priceChart.addLineSeries({ color: COLORS.gold, lineWidth: 1 });
+    ma5Series.setData(smaLine(5));
+    const ma20Series = priceChart.addLineSeries({ color: '#7fa8ff', lineWidth: 1 });
+    ma20Series.setData(smaLine(20));
+    priceChart.timeScale().fitContent();
+
+    volBoxRef.current.innerHTML = '';
+    const volChart = LightweightCharts.createChart(volBoxRef.current, { ...commonOpts, height: 80 });
+    const volSeries = volChart.addHistogramSeries({ priceFormat: { type: 'volume' } });
+    volSeries.setData(volumeData);
+    volChart.timeScale().fitContent();
+
+    rsiBoxRef.current.innerHTML = '';
+    const rsiChart = LightweightCharts.createChart(rsiBoxRef.current, { ...commonOpts, height: 90 });
+    const rsiSeries = rsiChart.addLineSeries({ color: '#c77dff', lineWidth: 2 });
+    rsiSeries.setData(rsiLine);
+    const upperBand = rsiChart.addLineSeries({ color: 'rgba(255,82,82,0.4)', lineWidth: 1, lineStyle: 2 });
+    upperBand.setData(rsiLine.map(p => ({ time: p.time, value: 70 })));
+    const lowerBand = rsiChart.addLineSeries({ color: 'rgba(46,204,113,0.4)', lineWidth: 1, lineStyle: 2 });
+    lowerBand.setData(rsiLine.map(p => ({ time: p.time, value: 30 })));
+    rsiChart.timeScale().fitContent();
+
+    // 三個圖表的水平捲動/縮放同步
+    const charts = [priceChart, volChart, rsiChart];
+    charts.forEach((c, idx) => {
+      c.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+        if (!range) return;
+        charts.forEach((other, j) => { if (j !== idx) other.timeScale().setVisibleLogicalRange(range); });
+      });
+    });
+
+    return () => { charts.forEach(c => c.remove()); };
+  }, [opens, highs, lows, closes, volumes, timestamps]);
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ fontSize: 12, color: COLORS.textSecondary, marginBottom: 4 }}>日K線(近3個月)· MA5(金) / MA20(藍)</div>
+      <div ref={priceBoxRef} style={{ borderRadius: 8, overflow: 'hidden' }} />
+      <div style={{ fontSize: 11, color: COLORS.textMuted, margin: '6px 0 2px' }}>成交量</div>
+      <div ref={volBoxRef} style={{ borderRadius: 8, overflow: 'hidden' }} />
+      <div style={{ fontSize: 11, color: COLORS.textMuted, margin: '6px 0 2px' }}>RSI(14)</div>
+      <div ref={rsiBoxRef} style={{ borderRadius: 8, overflow: 'hidden' }} />
+    </div>
+  );
+}
+
+function Gauge({ score, conclusion }) {
+  const angle = score === 1 ? 45 : score === -1 ? -45 : 0;
+  const color = score === 1 ? COLORS.up : score === -1 ? COLORS.down : COLORS.textSecondary;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0 4px' }}>
+      <svg width="160" height="90" viewBox="0 0 160 90">
+        <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none" stroke={COLORS.border} strokeWidth="10" strokeLinecap="round" />
+        <path
+          d={score === 1 ? "M 80 80 A 65 65 0 0 1 145 80" : score === -1 ? "M 15 80 A 65 65 0 0 1 80 80" : "M 70 80 A 65 65 0 0 1 90 80"}
+          fill="none" stroke={color} strokeWidth="10" strokeLinecap="round"
+        />
+        <g transform={`translate(80,80) rotate(${angle})`}>
+          <line x1="0" y1="0" x2="0" y2="-55" stroke={COLORS.gold} strokeWidth="3" strokeLinecap="round" />
+        </g>
+        <circle cx="80" cy="80" r="6" fill={COLORS.gold} />
+      </svg>
+      <div style={{ fontFamily: "'Noto Serif TC', serif", fontSize: 22, fontWeight: 700, color, marginTop: -6 }}>{conclusion}</div>
+    </div>
+  );
+}
+
+function StatBox({ label, value, sub, color }) {
+  return (
+    <div style={{ background: COLORS.cardRaised, borderRadius: 10, padding: '10px 12px', flex: '1 1 45%', minWidth: 130 }}>
+      <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: color || COLORS.textPrimary }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function InfoLine({ label, children, color }) {
+  return (
+    <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.7, color: color || COLORS.textPrimary }}>
+      {label && <span style={{ color: COLORS.textMuted }}>{label}:</span>} {children}
+    </div>
+  );
+}
+
+const VALID_USERNAME = '1111';
+const VALID_PASSWORD = '5168';
+const GUEST_SEARCH_LIMIT = 10;
+
+function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount, onShowLogs }) {
+  const [showForm, setShowForm] = useState(false);
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const [loginError, setLoginError] = useState('');
+
+  const submit = () => {
+    if (user === VALID_USERNAME && pass === VALID_PASSWORD) {
+      onLogin();
+      setShowForm(false);
+      setLoginError('');
+      setUser(''); setPass('');
+    } else {
+      setLoginError('帳號或密碼錯誤');
+    }
+  };
+
+  return (
+    <div style={{ position: 'absolute', top: 16, right: 16 }}>
+      {isLoggedIn ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+          <span style={{ color: COLORS.up }}>● 已登入</span>
+          <button onClick={onShowLogs} style={{
+            background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
+            borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+          }}>查看記錄</button>
+          <button onClick={onLogout} style={{
+            background: 'transparent', border: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted,
+            borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+          }}>登出</button>
+        </div>
+      ) : (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 10, color: COLORS.textMuted }}>
+              {isTradingWindow() ? `訪客(交易時段已查${guestCount}/${GUEST_SEARCH_LIMIT}次)` : '訪客(非交易時段,不限次數)'}
+            </span>
+            <button onClick={() => setShowForm(!showForm)} style={{
+              background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
+              borderRadius: 6, padding: '3px 10px', fontSize: 11, cursor: 'pointer',
+            }}>登入</button>
+          </div>
+          {showForm && (
+            <div style={{ position: 'absolute', right: 0, top: 26, background: COLORS.cardRaised, border: `0.5px solid ${COLORS.border}`, borderRadius: 8, padding: 10, width: 160, zIndex: 10 }}>
+              <input placeholder="帳號" value={user} onChange={e => setUser(e.target.value)}
+                style={{ width: '100%', marginBottom: 6, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '5px 8px', color: COLORS.textPrimary, fontSize: 12, outline: 'none' }} />
+              <input placeholder="密碼" type="password" value={pass} onChange={e => setPass(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && submit()}
+                style={{ width: '100%', marginBottom: 6, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '5px 8px', color: COLORS.textPrimary, fontSize: 12, outline: 'none' }} />
+              {loginError && <div style={{ color: COLORS.up, fontSize: 10, marginBottom: 6 }}>{loginError}</div>}
+              <button onClick={submit} style={{
+                width: '100%', background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 6,
+                padding: '5px 0', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              }}>確認登入</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StockAnalyzer() {
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const [watchlist, setWatchlist] = useState([]);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [now, setNow] = useState(new Date());
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [guestCount, setGuestCount] = useState(0);
+  const [showLogs, setShowLogs] = useState(false);
+  const [adminLogs, setAdminLogs] = useState(null);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [askLoading, setAskLoading] = useState(false);
+  const [askAnswer, setAskAnswer] = useState(null);
+  const nameMapRef = useRef(null);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('tw_stock_logged_in') === 'true') setIsLoggedIn(true);
+      setGuestCount(getGuestCountToday());
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const loadAdminLogs = async () => {
+    setLogsLoading(true);
+    const data = await fetchAdminLogs();
+    setLogsLoading(false);
+    setAdminLogs(data);
+  };
+
+  const handleLogin = () => {
+    setIsLoggedIn(true);
+    try { localStorage.setItem('tw_stock_logged_in', 'true'); } catch (e) { /* ignore */ }
+  };
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    try { localStorage.setItem('tw_stock_logged_in', 'false'); } catch (e) { /* ignore */ }
+  };
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('tw_stock_watchlist');
+      if (saved) setWatchlist(JSON.parse(saved));
+    } catch (e) { /* no watchlist yet */ }
+    fetchTwseNameMap().then(map => { if (map) nameMapRef.current = map; });
+  }, []);
+
+  const saveWatchlist = useCallback((list) => {
+    setWatchlist(list);
+    try { localStorage.setItem('tw_stock_watchlist', JSON.stringify(list)); } catch (e) { /* ignore */ }
+  }, []);
+
+  const runAnalysis = useCallback(async (code) => {
+    const cleaned = code.trim();
+    if (!cleaned) { setError('請輸入股票代號'); return; }
+
+    if (!isLoggedIn && isTradingWindow()) {
+      const currentCount = getGuestCountToday();
+      if (currentCount >= GUEST_SEARCH_LIMIT) {
+        setError(`交易時段(週一~週五09:00-13:30)訪客搜尋次數已達上限(${GUEST_SEARCH_LIMIT}次),交易時段結束後或明日開盤前不受限制,或請登入解鎖無限次查詢`);
+        return;
+      }
+    }
+    setLoading(true); setError(null); setResult(null);
+
+    const [data, marginChange, dividend, disposition, flow, announcements] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned),
+    ]);
+    setLoading(false);
+    if (!data) { setError(`查無「${cleaned}」的資料,請確認代號是否正確`); return; }
+
+    recordFlowHistory(cleaned, flow);
+    const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
+    const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
+    const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
+
+    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes);
+    // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
+    let chineseName = nameMapRef.current && nameMapRef.current[data.code];
+    if (!chineseName) chineseName = await fetchOtcName(cleaned);
+    if (!chineseName) chineseName = data.name;
+    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements });
+    setUpdatedAt(new Date());
+    logSearch(cleaned, !isLoggedIn);
+
+    if (!isLoggedIn && isTradingWindow()) {
+      try {
+        const newCount = incrementGuestCount();
+        setGuestCount(newCount);
+      } catch (e) { /* ignore */ }
+    }
+  }, [isLoggedIn]);
+
+  const addToWatchlist = () => {
+    if (!isLoggedIn) { setError('追蹤功能僅限登入會員使用,請先登入'); return; }
+    if (!result) return;
+    if (watchlist.includes(result.code)) return;
+    saveWatchlist([...watchlist, result.code]);
+  };
+
+  const buildContext = () => {
+    if (!result) return '';
+    const parts = [];
+    parts.push(`股票:${result.code} ${result.name}(${result.market})`);
+    parts.push(`現價:${result.last},今日漲跌:${result.dayChangePct != null ? result.dayChangePct.toFixed(2) + '%' : '無資料'}`);
+    parts.push(`綜合判斷:${result.conclusion}`);
+    if (result.ma5 && result.ma20) parts.push(`MA5=${result.ma5.toFixed(2)}, MA20=${result.ma20.toFixed(2)}`);
+    if (result.kd) parts.push(`KD: K=${result.kd.K}, D=${result.kd.D}`);
+    if (result.rsi != null) parts.push(`RSI(14)=${result.rsi}`);
+    if (result.macd) parts.push(`MACD柱狀圖=${result.macd.hist}(${result.macd.crossText})`);
+    if (result.biasInfo) parts.push(`乖離率=${result.biasInfo.bias}%(${result.biasInfo.warning || '正常'})`);
+    if (result.volRatio != null) parts.push(`量比=${result.volRatio}倍`);
+    if (result.stopLoss) parts.push(`建議停損價=${result.stopLoss.price}(依據:${result.stopLoss.basis})`);
+    if (result.flow) parts.push(`三大法人今日:外資${result.flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${result.flow.trustNet >= 0 ? '買超' : '賣超'}、自營商${result.flow.dealerNet >= 0 ? '買超' : '賣超'}`);
+    if (result.marginChange != null) parts.push(`散戶融資:${result.marginChange >= 0 ? '增加' : '減少'}`);
+    if (result.announcements && result.announcements.length > 0) {
+      parts.push('近期重大訊息:' + result.announcements.slice(0, 3).map(a => `[${a.date}]${a.subject}${a.sentiment ? `(AI判讀:${a.sentiment})` : ''}`).join('; '));
+    }
+    return parts.join('\n');
+  };
+
+  const askQuestion = async () => {
+    const q = question.trim();
+    if (!q) { return; }
+    if (!result) { setAskAnswer('請先查詢一檔股票,才能針對該股票提問'); return; }
+    setAskLoading(true); setAskAnswer(null);
+    try {
+      const context = buildContext();
+      const res = await fetch(`${PROXY_BASE}/api/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, context }),
+      });
+      const data = await res.json();
+      setAskAnswer(data.answer || '無法取得回答');
+    } catch (e) {
+      setAskAnswer('提問失敗,請稍後再試');
+    }
+    setAskLoading(false);
+  };
+  const removeFromWatchlist = (code) => {
+    saveWatchlist(watchlist.filter(c => c !== code));
+  };
+
+  return (
+    <div style={{ background: COLORS.bg, minHeight: '100vh', padding: '20px 16px 40px', fontFamily: "'Noto Sans TC', sans-serif", color: COLORS.textPrimary, position: 'relative' }}>
+      <LoginBadge isLoggedIn={isLoggedIn} onLogin={handleLogin} onLogout={handleLogout} guestCount={guestCount}
+        onShowLogs={() => { setShowLogs(!showLogs); if (!showLogs) loadAdminLogs(); }} />
+      <div style={{ textAlign: 'center', marginBottom: 20 }}>
+        <div style={{ fontFamily: "'Noto Serif TC', serif", fontSize: 22, fontWeight: 700, color: COLORS.gold, letterSpacing: 1 }}>台股即時分析</div>
+        <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>
+          詹景淵(0910896935)製作
+          <span style={{ color: '#ffffff', fontSize: 15, fontFamily: "'JetBrains Mono', monospace", marginLeft: 8 }}>
+            {now.getFullYear()}/{String(now.getMonth() + 1).padStart(2, '0')}/{String(now.getDate()).padStart(2, '0')} {String(now.getHours()).padStart(2, '0')}:{String(now.getMinutes()).padStart(2, '0')}:{String(now.getSeconds()).padStart(2, '0')}
+          </span>
+        </div>
+        <div style={{ color: COLORS.up, fontSize: 12, fontWeight: 700, marginTop: 4 }}>
+          僅提供製作者本人使用,其他人投資風險概不負責!
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && runAnalysis(input)}
+          placeholder="輸入股票代號,例如 2330"
+          style={{
+            flex: 1, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 8,
+            padding: '6px 10px', color: COLORS.textPrimary, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", outline: 'none',
+          }}
+        />
+        <button
+          onClick={() => runAnalysis(input)}
+          style={{
+            background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 8,
+            padding: '0 14px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+          }}
+        >查詢</button>
+      </div>
+
+      {showLogs && isLoggedIn && (
+        <div style={{ background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 12, padding: 14, marginBottom: 16, fontSize: 12 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, color: COLORS.gold }}>訪客/會員搜尋記錄</div>
+            <button onClick={loadAdminLogs} style={{
+              background: 'transparent', border: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted,
+              borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+            }}>重新整理</button>
+          </div>
+          {logsLoading && <div style={{ color: COLORS.textMuted }}>載入中...</div>}
+          {!logsLoading && adminLogs && adminLogs.logs && (
+            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
+              {adminLogs.logs.length === 0 && <div style={{ color: COLORS.textMuted }}>目前沒有記錄</div>}
+              {adminLogs.logs.map((log, i) => (
+                <div key={i} style={{
+                  display: 'flex', justifyContent: 'space-between', padding: '5px 0',
+                  borderBottom: i < adminLogs.logs.length - 1 ? `0.5px solid ${COLORS.border}` : 'none',
+                }}>
+                  <span style={{ color: COLORS.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {new Date(log.time).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}
+                  </span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{log.code}</span>
+                  <span style={{ color: log.type === '訪客' ? COLORS.orange : COLORS.up }}>{log.type}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 8 }}>{adminLogs.note}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {watchlist.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+          {watchlist.map(code => (
+            <div key={code} style={{
+              display: 'flex', alignItems: 'center', gap: 6, background: COLORS.cardRaised,
+              border: `0.5px solid ${COLORS.border}`, borderRadius: 999, padding: '5px 6px 5px 12px', fontSize: 13,
+            }}>
+              <span onClick={() => { setInput(code); runAnalysis(code); }} style={{ cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace" }}>{code}</span>
+              <span onClick={() => removeFromWatchlist(code)} style={{ cursor: 'pointer', color: COLORS.textMuted, padding: '0 6px' }}>×</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ textAlign: 'center', color: COLORS.textSecondary, padding: '40px 0', fontSize: 14, lineHeight: 1.8 }}>
+          查詢中...<br />
+          <span style={{ fontSize: 12, color: COLORS.textMuted }}>若伺服器閒置一段時間,第一次查詢可能需要等待30-50秒喚醒</span>
+        </div>
+      )}
+
+      {error && !loading && (
+        <div style={{ background: COLORS.card, border: `0.5px solid ${COLORS.up}`, borderRadius: 10, padding: 14, fontSize: 13, color: COLORS.up, lineHeight: 1.6 }}>
+          {error}
+        </div>
+      )}
+
+      {result && !loading && (
+        <div style={{ background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 14, padding: '18px 16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: 12, color: COLORS.textMuted }}>{result.code} · {result.market}</div>
+              <div style={{ fontSize: 17, fontWeight: 700, marginTop: 2 }}>{result.name}</div>
+            </div>
+            <button onClick={addToWatchlist} style={{
+              background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
+              borderRadius: 8, padding: '5px 10px', fontSize: 12, cursor: 'pointer',
+            }}>+ 追蹤</button>
+          </div>
+
+          {result.insufficientData && (
+            <div style={{ marginTop: 10, background: 'rgba(255,171,92,0.1)', border: `0.5px solid ${COLORS.orange}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: COLORS.orange, lineHeight: 1.6 }}>
+              ⚠️此股票僅有 {result.dataPoints} 個交易日的歷史資料(技術指標至少需要20個交易日),可能是**近期新上市**的股票,目前只能顯示現價,完整技術分析需等交易天數累積足夠後才能計算。
+            </div>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, margin: '14px 0 0' }}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 34, fontWeight: 700, color: COLORS.gold }}>{result.last}</div>
+            {result.dayChangePct != null && (
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: result.dayChangePct >= 0 ? COLORS.up : COLORS.down }}>
+                {result.dayChangePct >= 0 ? '▲' : '▼'}{Math.abs(result.dayChangePct).toFixed(2)}%
+              </div>
+            )}
+          </div>
+
+          <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
+            volumes={result.volumes} timestamps={result.timestamps} name={result.name} code={result.code} />
+          <Gauge score={result.score} conclusion={result.conclusion} />
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
+            <StatBox label="MA5 / MA20" value={result.ma5 && result.ma20 ? `${result.ma5.toFixed(2)} / ${result.ma20.toFixed(2)}` : '—'}
+              sub={result.ma5 && result.ma20 ? (result.ma5 > result.ma20 ? '站上均線(偏多)' : '跌破均線(偏空)') : ''}
+              color={result.ma5 && result.ma20 ? (result.ma5 > result.ma20 ? COLORS.up : COLORS.down) : undefined} />
+            <StatBox label="KD" value={result.kd ? `${result.kd.K} / ${result.kd.D}` : '—'}
+              sub={result.kd ? (result.kd.K > result.kd.D ? 'K>D(偏多)' : 'K<D(偏空)') : ''}
+              color={result.kd ? (result.kd.K > result.kd.D ? COLORS.up : COLORS.down) : undefined} />
+            <StatBox label="RSI(14)" value={result.rsi ?? '—'}
+              sub={result.rsi > 80 ? '⚠️短線超買' : result.rsi < 20 ? '短線超賣' : ''}
+              color={result.rsi > 80 ? COLORS.orange : undefined} />
+            <StatBox label="MACD" value={result.macd ? result.macd.hist : '—'}
+              sub={result.macd ? result.macd.crossText : ''}
+              color={result.macd ? (result.macd.macd > result.macd.signal ? COLORS.up : COLORS.down) : undefined} />
+            <StatBox label="乖離率(BIAS)" value={result.biasInfo ? `${result.biasInfo.bias}%` : '—'}
+              sub={result.biasInfo ? result.biasInfo.warning : ''}
+              color={result.biasInfo && result.biasInfo.bias > 8 ? COLORS.orange : undefined} />
+            <StatBox label="量比" value={result.volRatio ?? '—'}
+              sub={result.volRatio >= 2 ? '成交量明顯放大' : (result.volTrend || '')}
+              color={result.volRatio >= 2 ? COLORS.gold : undefined} />
+          </div>
+
+          {result.crossInfo && (
+            <InfoLine label="均線交叉" color={COLORS.blue}>
+              {result.crossInfo.statusText};目前{result.crossInfo.direction}
+            </InfoLine>
+          )}
+
+          {result.stopLoss && (
+            <div style={{ marginTop: 12, background: COLORS.cardRaised, borderRadius: 10, padding: '12px 14px' }}>
+              <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 4 }}>建議停損價(依據:{result.stopLoss.basis})</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color: COLORS.blue }}>
+                {result.stopLoss.price} <span style={{ fontSize: 12, color: COLORS.textSecondary, fontWeight: 400 }}>(距現價 {result.stopLoss.lossPct}%)</span>
+              </div>
+              <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 4 }}>參考數值:{result.stopLoss.detailText}</div>
+            </div>
+          )}
+
+          {result.upDaysInfo && (
+            <InfoLine label="追高風險檢視" color={COLORS.pink}>
+              {result.biasInfo ? `乖離率${result.biasInfo.bias}%${result.biasInfo.warning ? ` (${result.biasInfo.warning})` : ''}` : ''}、
+              RSI(14)={result.rsi}{result.rsi > 80 ? ' ⚠️短線超買' : ''}、
+              {result.upDaysInfo.label}
+            </InfoLine>
+          )}
+
+          {result.todayVolZhang != null && (
+            <InfoLine label="成交量">{result.todayVolZhang} 張</InfoLine>
+          )}
+
+          {result.volumeDivergence && (
+            <InfoLine color={result.volumeDivergence.color}>{result.volumeDivergence.text}</InfoLine>
+          )}
+
+          {result.flow && (
+            <InfoLine label="三大法人(今日)">
+              外資{result.flow.foreignNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.foreignNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.foreignNet / 1000))}張</span>}、
+              投信{result.flow.trustNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.trustNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.trustNet / 1000))}張</span>}、
+              自營商{result.flow.dealerNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.dealerNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.dealerNet / 1000))}張</span>}、
+              合計{result.flow.totalNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.totalNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.totalNet / 1000))}張</span>}
+            </InfoLine>
+          )}
+
+          {(result.foreignStreak?.days > 0 || result.trustStreak?.days > 0 || result.dealerStreak?.days > 0) && (
+            <InfoLine label="連續買賣天數">
+              {[
+                result.foreignStreak?.days > 0 ? `外資連${result.foreignStreak.days}日${result.foreignStreak.direction}` : null,
+                result.trustStreak?.days > 0 ? `投信連${result.trustStreak.days}日${result.trustStreak.direction}` : null,
+                result.dealerStreak?.days > 0 ? `自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}` : null,
+              ].filter(Boolean).join('、')}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※依本機累積記錄計算,剛開始使用天數會較少</span>
+            </InfoLine>
+          )}
+
+          {result.marginChange != null && (
+            <InfoLine label="散戶">
+              {result.marginChange >= 0
+                ? <span style={{ color: COLORS.up }}>買超(融資增加) {Math.abs(Math.round(result.marginChange / 1000))} 張</span>
+                : <span style={{ color: COLORS.down }}>賣超(融資減少) {Math.abs(Math.round(result.marginChange / 1000))} 張</span>}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※以融資餘額增減作為散戶動向替代指標,非官方直接統計</span>
+            </InfoLine>
+          )}
+
+          {result.announcements && result.announcements.length > 0 && (
+            <div style={{ marginTop: 12, background: COLORS.cardRaised, borderRadius: 10, padding: '10px 14px' }}>
+              <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>最新重大訊息公告</div>
+              {result.announcements.map((a, i) => (
+                <div key={i} style={{ fontSize: 12, marginBottom: i < result.announcements.length - 1 ? 10 : 0, lineHeight: 1.5 }}>
+                  <span style={{ color: COLORS.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>{a.date}</span>{' '}
+                  <span style={{ color: COLORS.yellow }}>{a.subject}</span>
+                  {a.sentiment && (
+                    <div style={{ marginTop: 3 }}>
+                      <span style={{ color: a.sentiment === '利多' ? COLORS.up : a.sentiment === '利空' ? COLORS.down : COLORS.textSecondary, fontWeight: 700 }}>
+                        [{a.sentiment}]
+                      </span>{' '}
+                      <span style={{ color: COLORS.textSecondary }}>{a.reason}</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※資料來源:公開資訊觀測站,依法公開揭露之重大訊息,非即時新聞、非內線消息;情緒分析由Gemini AI自動判讀,非投資建議,僅供參考</div>
+            </div>
+          )}
+
+          {result.dividend && result.dividend.boardDate && (
+            <InfoLine label="股利分派">
+              {result.dividend.year}年度,董事會決議分派日 {result.dividend.boardDate}
+              {result.dividend.progress ? `(${result.dividend.progress})` : ''}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※此為董事會決議日,非最終除息交易日,實際除息日請以證交所公告為準</span>
+            </InfoLine>
+          )}
+
+          {result.disposition && result.disposition.period && (
+            <InfoLine color={COLORS.orange}>
+              ⚠️處置股:公布日期 {result.disposition.announceDate},處置期間 {result.disposition.period}
+              (累計第{result.disposition.count}次),措施:{result.disposition.measure}
+            </InfoLine>
+          )}
+
+          {result.tomorrowOutlook && (
+            <InfoLine color={result.tomorrowOutlook.includes('偏多') ? COLORS.up : result.tomorrowOutlook.includes('偏空') ? COLORS.down : COLORS.textSecondary}>
+              {result.tomorrowOutlook}
+            </InfoLine>
+          )}
+
+          <div style={{ marginTop: 16, borderTop: `0.5px solid ${COLORS.border}`, paddingTop: 12 }}>
+            <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 8 }}>問問AI關於這檔股票</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                value={question}
+                onChange={e => setQuestion(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && askQuestion()}
+                placeholder="例如:目前適合進場嗎?"
+                style={{
+                  flex: 1, background: COLORS.cardRaised, border: `0.5px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: '7px 10px', color: COLORS.textPrimary, fontSize: 13, outline: 'none',
+                }}
+              />
+              <button onClick={askQuestion} style={{
+                background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 8,
+                padding: '0 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              }}>問AI</button>
+            </div>
+            {askLoading && <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 8 }}>AI思考中...</div>}
+            {askAnswer && !askLoading && (
+              <div style={{ marginTop: 8, background: COLORS.cardRaised, borderRadius: 8, padding: '10px 12px', fontSize: 13, lineHeight: 1.7, color: COLORS.textPrimary }}>
+                {askAnswer}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※AI回答依據上方已查詢的資料生成,可能有誤判,非投資建議,僅供參考</div>
+          </div>
+
+          <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 14, lineHeight: 1.6 }}>
+            以上為技術面客觀計算,並非投資建議,僅供參考。資料來源:Yahoo Finance、證交所(經代理伺服器轉發)。
+            {updatedAt && <span> 更新時間:{updatedAt.toLocaleTimeString('zh-TW')}</span>}
+          </div>
+        </div>
+      )}
+
+      {!result && !loading && !error && (
+        <div style={{ textAlign: 'center', color: COLORS.textMuted, padding: '40px 20px', fontSize: 13, lineHeight: 1.8 }}>
+          輸入股票代號並按查詢,即可看到即時技術面分析<br />
+          (上市股票直接輸入代號,上櫃股票會自動嘗試)
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<StockAnalyzer />);
+</script>
+</body>
+</html>
