@@ -436,6 +436,17 @@ async function fetchDisposition(code) {
   }
 }
 
+async function fetchAnnouncements(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/announcements/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.announcements;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchIntraday(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/intraday/${code}`);
@@ -761,8 +772,8 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned),
+    const [data, marginChange, dividend, disposition, flow, announcements] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${cleaned}」的資料,請確認代號是否正確`); return; }
@@ -777,7 +788,7 @@ function StockAnalyzer() {
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
-    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak });
+    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements });
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
 
@@ -1006,6 +1017,19 @@ function StockAnalyzer() {
                 : <span style={{ color: COLORS.down }}>賣超(融資減少) {Math.abs(Math.round(result.marginChange / 1000))} 張</span>}
               <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※以融資餘額增減作為散戶動向替代指標,非官方直接統計</span>
             </InfoLine>
+          )}
+
+          {result.announcements && result.announcements.length > 0 && (
+            <div style={{ marginTop: 12, background: COLORS.cardRaised, borderRadius: 10, padding: '10px 14px' }}>
+              <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>最新重大訊息公告</div>
+              {result.announcements.map((a, i) => (
+                <div key={i} style={{ fontSize: 12, marginBottom: i < result.announcements.length - 1 ? 6 : 0, lineHeight: 1.5 }}>
+                  <span style={{ color: COLORS.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>{a.date}</span>{' '}
+                  <span>{a.subject}</span>
+                </div>
+              ))}
+              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※資料來源:公開資訊觀測站,依法公開揭露之重大訊息,非即時新聞、非內線消息</div>
+            </div>
           )}
 
           {result.dividend && result.dividend.boardDate && (
