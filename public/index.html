@@ -301,6 +301,40 @@ function getTaipeiDateStr() {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(new Date());
 }
 
+// 訪客搜尋次數:每天(以台北時區為準)自動重置
+function getGuestCountToday() {
+  const today = getTaipeiDateStr();
+  const storedDate = localStorage.getItem('tw_stock_guest_date');
+  if (storedDate !== today) {
+    localStorage.setItem('tw_stock_guest_date', today);
+    localStorage.setItem('tw_stock_guest_count', '0');
+    return 0;
+  }
+  return parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
+}
+
+function incrementGuestCount() {
+  const newCount = getGuestCountToday() + 1;
+  localStorage.setItem('tw_stock_guest_date', getTaipeiDateStr());
+  localStorage.setItem('tw_stock_guest_count', String(newCount));
+  return newCount;
+}
+
+// 判斷現在是否為台股交易時段(週一~週五 09:00-13:30,以台北時區為準)
+function isTradingWindow() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const weekday = parts.find(p => p.type === 'weekday').value; // Mon, Tue, ... Sun
+  const hh = +parts.find(p => p.type === 'hour').value;
+  const mm = +parts.find(p => p.type === 'minute').value;
+  const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday);
+  const minutes = hh * 60 + mm;
+  const isTradingTime = minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
+  return isWeekday && isTradingTime;
+}
+
 function recordFlowHistory(code, flow) {
   if (!flow) return;
   try {
@@ -606,7 +640,9 @@ function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount }) {
       ) : (
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 10, color: COLORS.textMuted }}>訪客(已查{guestCount}/{GUEST_SEARCH_LIMIT}次)</span>
+            <span style={{ fontSize: 10, color: COLORS.textMuted }}>
+              {isTradingWindow() ? `訪客(交易時段已查${guestCount}/${GUEST_SEARCH_LIMIT}次)` : '訪客(非交易時段,不限次數)'}
+            </span>
             <button onClick={() => setShowForm(!showForm)} style={{
               background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
               borderRadius: 6, padding: '3px 10px', fontSize: 11, cursor: 'pointer',
@@ -652,8 +688,7 @@ function StockAnalyzer() {
   useEffect(() => {
     try {
       if (localStorage.getItem('tw_stock_logged_in') === 'true') setIsLoggedIn(true);
-      const gc = parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
-      setGuestCount(gc);
+      setGuestCount(getGuestCountToday());
     } catch (e) { /* ignore */ }
   }, []);
 
@@ -683,10 +718,10 @@ function StockAnalyzer() {
     const cleaned = code.trim();
     if (!cleaned) { setError('請輸入股票代號'); return; }
 
-    if (!isLoggedIn) {
-      const currentCount = parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
+    if (!isLoggedIn && isTradingWindow()) {
+      const currentCount = getGuestCountToday();
       if (currentCount >= GUEST_SEARCH_LIMIT) {
-        setError(`訪客搜尋次數已達上限(${GUEST_SEARCH_LIMIT}次),請登入解鎖無限次查詢`);
+        setError(`交易時段(週一~週五09:00-13:30)訪客搜尋次數已達上限(${GUEST_SEARCH_LIMIT}次),交易時段結束後或明日開盤前不受限制,或請登入解鎖無限次查詢`);
         return;
       }
     }
@@ -711,10 +746,11 @@ function StockAnalyzer() {
     setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak });
     setUpdatedAt(new Date());
 
-    if (!isLoggedIn) {
-      const newCount = (parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10)) + 1;
-      try { localStorage.setItem('tw_stock_guest_count', String(newCount)); } catch (e) { /* ignore */ }
-      setGuestCount(newCount);
+    if (!isLoggedIn && isTradingWindow()) {
+      try {
+        const newCount = incrementGuestCount();
+        setGuestCount(newCount);
+      } catch (e) { /* ignore */ }
     }
   }, [isLoggedIn]);
 
