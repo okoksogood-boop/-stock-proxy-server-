@@ -572,6 +572,66 @@ function InfoLine({ label, children, color }) {
   );
 }
 
+const VALID_USERNAME = '1111';
+const VALID_PASSWORD = '5168';
+const GUEST_SEARCH_LIMIT = 10;
+
+function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount }) {
+  const [showForm, setShowForm] = useState(false);
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const [loginError, setLoginError] = useState('');
+
+  const submit = () => {
+    if (user === VALID_USERNAME && pass === VALID_PASSWORD) {
+      onLogin();
+      setShowForm(false);
+      setLoginError('');
+      setUser(''); setPass('');
+    } else {
+      setLoginError('帳號或密碼錯誤');
+    }
+  };
+
+  return (
+    <div style={{ position: 'absolute', top: 16, right: 16 }}>
+      {isLoggedIn ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
+          <span style={{ color: COLORS.up }}>● 已登入</span>
+          <button onClick={onLogout} style={{
+            background: 'transparent', border: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted,
+            borderRadius: 6, padding: '3px 8px', fontSize: 11, cursor: 'pointer',
+          }}>登出</button>
+        </div>
+      ) : (
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 10, color: COLORS.textMuted }}>訪客(已查{guestCount}/{GUEST_SEARCH_LIMIT}次)</span>
+            <button onClick={() => setShowForm(!showForm)} style={{
+              background: 'transparent', border: `0.5px solid ${COLORS.goldDim}`, color: COLORS.gold,
+              borderRadius: 6, padding: '3px 10px', fontSize: 11, cursor: 'pointer',
+            }}>登入</button>
+          </div>
+          {showForm && (
+            <div style={{ position: 'absolute', right: 0, top: 26, background: COLORS.cardRaised, border: `0.5px solid ${COLORS.border}`, borderRadius: 8, padding: 10, width: 160, zIndex: 10 }}>
+              <input placeholder="帳號" value={user} onChange={e => setUser(e.target.value)}
+                style={{ width: '100%', marginBottom: 6, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '5px 8px', color: COLORS.textPrimary, fontSize: 12, outline: 'none' }} />
+              <input placeholder="密碼" type="password" value={pass} onChange={e => setPass(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && submit()}
+                style={{ width: '100%', marginBottom: 6, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '5px 8px', color: COLORS.textPrimary, fontSize: 12, outline: 'none' }} />
+              {loginError && <div style={{ color: COLORS.up, fontSize: 10, marginBottom: 6 }}>{loginError}</div>}
+              <button onClick={submit} style={{
+                width: '100%', background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 6,
+                padding: '5px 0', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              }}>確認登入</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StockAnalyzer() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -580,12 +640,31 @@ function StockAnalyzer() {
   const [watchlist, setWatchlist] = useState([]);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [now, setNow] = useState(new Date());
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [guestCount, setGuestCount] = useState(0);
   const nameMapRef = useRef(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('tw_stock_logged_in') === 'true') setIsLoggedIn(true);
+      const gc = parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
+      setGuestCount(gc);
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  const handleLogin = () => {
+    setIsLoggedIn(true);
+    try { localStorage.setItem('tw_stock_logged_in', 'true'); } catch (e) { /* ignore */ }
+  };
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    try { localStorage.setItem('tw_stock_logged_in', 'false'); } catch (e) { /* ignore */ }
+  };
 
   useEffect(() => {
     try {
@@ -603,6 +682,14 @@ function StockAnalyzer() {
   const runAnalysis = useCallback(async (code) => {
     const cleaned = code.trim();
     if (!cleaned) { setError('請輸入股票代號'); return; }
+
+    if (!isLoggedIn) {
+      const currentCount = parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10);
+      if (currentCount >= GUEST_SEARCH_LIMIT) {
+        setError(`訪客搜尋次數已達上限(${GUEST_SEARCH_LIMIT}次),請登入解鎖無限次查詢`);
+        return;
+      }
+    }
     setLoading(true); setError(null); setResult(null);
 
     const [data, marginChange, dividend, disposition, flow] = await Promise.all([
@@ -623,9 +710,16 @@ function StockAnalyzer() {
     if (!chineseName) chineseName = data.name;
     setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak });
     setUpdatedAt(new Date());
-  }, []);
+
+    if (!isLoggedIn) {
+      const newCount = (parseInt(localStorage.getItem('tw_stock_guest_count') || '0', 10)) + 1;
+      try { localStorage.setItem('tw_stock_guest_count', String(newCount)); } catch (e) { /* ignore */ }
+      setGuestCount(newCount);
+    }
+  }, [isLoggedIn]);
 
   const addToWatchlist = () => {
+    if (!isLoggedIn) { setError('追蹤功能僅限登入會員使用,請先登入'); return; }
     if (!result) return;
     if (watchlist.includes(result.code)) return;
     saveWatchlist([...watchlist, result.code]);
@@ -635,7 +729,8 @@ function StockAnalyzer() {
   };
 
   return (
-    <div style={{ background: COLORS.bg, minHeight: '100vh', padding: '20px 16px 40px', fontFamily: "'Noto Sans TC', sans-serif", color: COLORS.textPrimary }}>
+    <div style={{ background: COLORS.bg, minHeight: '100vh', padding: '20px 16px 40px', fontFamily: "'Noto Sans TC', sans-serif", color: COLORS.textPrimary, position: 'relative' }}>
+      <LoginBadge isLoggedIn={isLoggedIn} onLogin={handleLogin} onLogout={handleLogout} guestCount={guestCount} />
       <div style={{ textAlign: 'center', marginBottom: 20 }}>
         <div style={{ fontFamily: "'Noto Serif TC', serif", fontSize: 22, fontWeight: 700, color: COLORS.gold, letterSpacing: 1 }}>台股即時分析</div>
         <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 2 }}>
