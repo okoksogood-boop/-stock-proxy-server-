@@ -279,8 +279,60 @@ async function fetchStock(code) {
     const res = await fetch(`${PROXY_BASE}/api/stock/${code}`);
     if (!res.ok) return null;
     const data = await res.json();
-    if (!data.closes || data.closes.length < 20) return null;
+    if (!data.closes || data.closes.length === 0) return null;
     return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchInstitutional(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/institutional/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.flow;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getTaipeiDateStr() {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(new Date());
+}
+
+function recordFlowHistory(code, flow) {
+  if (!flow) return;
+  try {
+    const key = 'tw_stock_flow_history';
+    const all = JSON.parse(localStorage.getItem(key) || '[]');
+    const today = getTaipeiDateStr();
+    // 若今天已經記錄過這檔股票,不重複記錄(避免同一天查詢多次造成資料失真)
+    if (all.some((r) => r.code === code && r.date === today)) return;
+    all.push({ date: today, code, ...flow });
+    // 只保留最近90筆同一檔股票的記錄,避免localStorage無限增長
+    const trimmed = all.filter((r) => r.code !== code).concat(
+      all.filter((r) => r.code === code).slice(-90)
+    );
+    localStorage.setItem(key, JSON.stringify(trimmed));
+  } catch (e) { /* ignore */ }
+}
+
+function getConsecutiveDays(code, field) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const rows = all.filter((r) => r.code === code).sort((a, b) => b.date.localeCompare(a.date));
+    if (rows.length === 0) return null;
+    const first = rows[0][field];
+    if (first === 0 || first == null) return { days: 0, direction: '持平' };
+    const direction = first > 0 ? '買超' : '賣超';
+    let count = 0;
+    for (const r of rows) {
+      const v = r[field];
+      if ((direction === '買超' && v > 0) || (direction === '賣超' && v < 0)) count++;
+      else break;
+    }
+    return { days: count, direction };
   } catch (e) {
     return null;
   }
@@ -553,18 +605,23 @@ function StockAnalyzer() {
     if (!cleaned) { setError('請輸入股票代號'); return; }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned),
+    const [data, marginChange, dividend, disposition, flow] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${cleaned}」的資料,請確認代號是否正確`); return; }
+
+    recordFlowHistory(cleaned, flow);
+    const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
+    const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
+    const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
 
     const analysis = analyze(data.closes, data.highs, data.lows, data.volumes);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
-    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition });
+    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak });
     setUpdatedAt(new Date());
   }, []);
 
@@ -652,6 +709,12 @@ function StockAnalyzer() {
             }}>+ 追蹤</button>
           </div>
 
+          {result.insufficientData && (
+            <div style={{ marginTop: 10, background: 'rgba(255,171,92,0.1)', border: `0.5px solid ${COLORS.orange}`, borderRadius: 8, padding: '10px 12px', fontSize: 12, color: COLORS.orange, lineHeight: 1.6 }}>
+              ⚠️此股票僅有 {result.dataPoints} 個交易日的歷史資料(技術指標至少需要20個交易日),可能是**近期新上市**的股票,目前只能顯示現價,完整技術分析需等交易天數累積足夠後才能計算。
+            </div>
+          )}
+
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, margin: '14px 0 0' }}>
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 34, fontWeight: 700, color: COLORS.gold }}>{result.last}</div>
             {result.dayChangePct != null && (
@@ -716,6 +779,26 @@ function StockAnalyzer() {
 
           {result.volumeDivergence && (
             <InfoLine color={result.volumeDivergence.color}>{result.volumeDivergence.text}</InfoLine>
+          )}
+
+          {result.flow && (
+            <InfoLine label="三大法人(今日)">
+              外資{result.flow.foreignNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.foreignNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.foreignNet / 1000))}張</span>}、
+              投信{result.flow.trustNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.trustNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.trustNet / 1000))}張</span>}、
+              自營商{result.flow.dealerNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.dealerNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.dealerNet / 1000))}張</span>}、
+              合計{result.flow.totalNet >= 0 ? <span style={{ color: COLORS.up }}>買超 {Math.abs(Math.round(result.flow.totalNet / 1000))}張</span> : <span style={{ color: COLORS.down }}>賣超 {Math.abs(Math.round(result.flow.totalNet / 1000))}張</span>}
+            </InfoLine>
+          )}
+
+          {(result.foreignStreak?.days > 0 || result.trustStreak?.days > 0 || result.dealerStreak?.days > 0) && (
+            <InfoLine label="連續買賣天數">
+              {[
+                result.foreignStreak?.days > 0 ? `外資連${result.foreignStreak.days}日${result.foreignStreak.direction}` : null,
+                result.trustStreak?.days > 0 ? `投信連${result.trustStreak.days}日${result.trustStreak.direction}` : null,
+                result.dealerStreak?.days > 0 ? `自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}` : null,
+              ].filter(Boolean).join('、')}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※依本機累積記錄計算,剛開始使用天數會較少</span>
+            </InfoLine>
           )}
 
           {result.marginChange != null && (
