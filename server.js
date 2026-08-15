@@ -26,6 +26,7 @@ app.get('/health', (req, res) => {
 app.get('/api/stock/:code', async (req, res) => {
   const code = req.params.code.trim();
   const suffixes = ['.TW', '.TWO'];
+  let bestPartial = null;
 
   for (const suf of suffixes) {
     try {
@@ -42,9 +43,9 @@ app.get('/api/stock/:code', async (req, res) => {
       const validIdx = quote.close
         .map((v, i) => (v != null ? i : -1))
         .filter((i) => i >= 0);
-      if (validIdx.length < 20) continue;
+      if (validIdx.length === 0) continue;
 
-      return res.json({
+      const payload = {
         code,
         market: suf === '.TW' ? '上市' : '上櫃',
         name: result.meta?.longName || result.meta?.shortName || code,
@@ -54,11 +55,18 @@ app.get('/api/stock/:code', async (req, res) => {
         lows: validIdx.map((i) => quote.low[i]),
         volumes: validIdx.map((i) => quote.volume[i]),
         timestamps: validIdx.map((i) => result.timestamp[i]),
-      });
+        insufficientData: validIdx.length < 20,
+        dataPoints: validIdx.length,
+      };
+
+      if (validIdx.length >= 20) return res.json(payload); // 資料足夠,直接回傳
+      if (!bestPartial) bestPartial = payload; // 資料不足20筆,先記住,繼續嘗試另一個後綴看是否有更完整的
     } catch (e) {
       continue;
     }
   }
+  // 兩種後綴都試過:若有查到但資料不足(通常是新上市股票),仍回傳讓前端顯示說明,而非直接判定查無資料
+  if (bestPartial) return res.json(bestPartial);
   return res.status(404).json({ error: `查無「${code}」的資料,請確認代號是否正確` });
 });
 
@@ -150,6 +158,40 @@ app.get('/api/disposition/:code', async (req, res) => {
     });
   } catch (e) {
     return res.json({ code, disposition: null });
+  }
+});
+
+// ---------- 三大法人(外資/投信/自營商)當日買賣超 ----------
+// 用法: GET /api/institutional/2330
+app.get('/api/institutional/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://www.twse.com.tw/fund/T86?response=json&date=&selectType=ALLBUT0999';
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const json = await response.json();
+    if (json.stat !== 'OK' || !json.data) return res.json({ code, flow: null });
+
+    const fields = json.fields;
+    const idxCode = fields.indexOf('證券代號');
+    const idxForeign1 = fields.indexOf('外陸資買賣超股數(不含外資自營商)');
+    const idxForeign2 = fields.indexOf('外資自營商買賣超股數');
+    const idxTrust = fields.indexOf('投信買賣超股數');
+    const idxDealer = fields.indexOf('自營商買賣超股數');
+    const idxTotal = fields.indexOf('三大法人買賣超股數');
+    if (idxCode < 0 || idxTotal < 0) return res.json({ code, flow: null });
+
+    const row = json.data.find((r) => (r[idxCode] || '').trim() === code);
+    if (!row) return res.json({ code, flow: null });
+
+    const num = (v) => parseFloat((v || '0').replace(/,/g, '')) || 0;
+    const foreignNet = num(row[idxForeign1]) + (idxForeign2 >= 0 ? num(row[idxForeign2]) : 0);
+    const trustNet = idxTrust >= 0 ? num(row[idxTrust]) : 0;
+    const dealerNet = num(row[idxDealer]);
+    const totalNet = num(row[idxTotal]);
+
+    return res.json({ code, flow: { foreignNet, trustNet, dealerNet, totalNet } });
+  } catch (e) {
+    return res.json({ code, flow: null });
   }
 });
 
