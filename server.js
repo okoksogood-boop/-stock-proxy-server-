@@ -145,7 +145,7 @@ app.post('/api/ask', async (req, res) => {
   if (!question || !context) return res.status(400).json({ error: '缺少必要參數' });
   try {
     const prompt = `你是一位台股分析助手。以下是某檔股票目前的數據資料:\n\n${context}\n\n使用者問題:${question}\n\n請根據以上資料回答,語氣像專業分析師一樣客觀中立,回答控制在150字以內。如果資料不足以回答,請誠實說明資料不足。請勿給出「保證上漲」「一定要買」「現在就賣」這類武斷確定性的投資建議,可以提供技術面/基本面/籌碼面的客觀解讀,並在回答最後提醒最終決策需自行判斷、非投資建議。`;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -171,7 +171,7 @@ async function getAnnouncementSentiment(items) {
     });
     const prompt = `你是台股分析助手。以下是股票重大訊息公告內容清單,請針對每一則判斷對股價可能是「利多」「利空」或「中性」,並給一句話簡短理由(15字以內)。請務必只回傳JSON陣列,格式如下,不要有其他文字說明:\n[{"id":0,"sentiment":"利多/利空/中性","reason":"簡短理由"}]\n\n公告清單:\n${JSON.stringify(itemsForPrompt)}`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
