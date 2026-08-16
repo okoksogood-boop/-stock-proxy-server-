@@ -152,10 +152,16 @@ app.post('/api/ask', async (req, res) => {
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
     const json = await r.json();
-    const answer = json?.candidates?.[0]?.content?.parts?.[0]?.text || '無法取得回答,請稍後再試';
+    const answer = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!answer) {
+      // 拿不到預期格式的回答時,把Gemini實際回傳的內容原封不動附上,方便排查問題(除錯用,之後穩定運作後可移除)
+      console.error('Gemini /api/ask 回應異常:', JSON.stringify(json));
+      return res.json({ answer: `無法取得回答(除錯資訊,HTTP狀態:${r.status}):${JSON.stringify(json).slice(0, 500)}` });
+    }
     return res.json({ answer });
   } catch (e) {
-    return res.status(500).json({ error: 'AI回答失敗' });
+    console.error('Gemini /api/ask 例外錯誤:', e);
+    return res.status(500).json({ error: `AI回答失敗:${e.message}` });
   }
 });
 
@@ -384,4 +390,3 @@ app.get('/api/intraday/:code', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`代理伺服器已啟動,監聽埠號 ${PORT}`);
 });
-
