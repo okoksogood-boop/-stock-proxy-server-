@@ -25,7 +25,7 @@ const COLORS = {
   bg: '#0e1116', card: '#161b22', cardRaised: '#1c2229',
   border: 'rgba(255,255,255,0.08)', gold: '#d4a24c', goldDim: '#8a6b32',
   up: '#ff5252', down: '#2ecc71', blue: '#4da6ff', pink: '#ff85d1', orange: '#ffab5c', yellow: '#ffd23f',
-  textPrimary: '#e8e6e0', textSecondary: '#9099a8', textMuted: '#5f6672',
+  textPrimary: '#f0f0ec', textSecondary: '#b8c0cc', textMuted: '#8a93a3',
 };
 
 // ================= 技術指標計算(與PowerShell報告邏輯一致) =================
@@ -185,6 +185,17 @@ function computeCrossInfo(closes) {
   return { crossPrice, direction, statusText };
 }
 
+// 交易成本試算:官方公告標準費率(未打折)——手續費買賣各收0.1425%,證交稅一般0.3%/當沖0.15%(優惠現行至2027年底)
+function computeTradingCost() {
+  const feeRate = 0.001425;
+  const dayTradeTax = 0.0015;
+  const normalTax = 0.003;
+  return {
+    dayTrade: +((feeRate * 2 + dayTradeTax) * 100).toFixed(2),
+    normal: +((feeRate * 2 + normalTax) * 100).toFixed(2),
+  };
+}
+
 function computeStopLoss(closes, highs, lows, lastPrice) {
   if (closes.length < 21) return null;
   const ma20 = sma(closes, 20);
@@ -274,10 +285,12 @@ function analyze(closes, highs, lows, volumes) {
     if (dist2 < 2) triggerAlert = `⚠️即將觸發:現價距離建議停損價 ${stopLoss.price} 僅 ${dist2.toFixed(2)}%`;
   }
 
+  const tradingCost = computeTradingCost();
+
   return {
     last: +last.toFixed(2), dayChangePct, ma5, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
-    conclusion, score, todayVolZhang, triggerAlert,
+    conclusion, score, todayVolZhang, triggerAlert, tradingCost,
   };
 }
 
@@ -477,6 +490,42 @@ async function fetchAnnouncements(code) {
   }
 }
 
+async function fetchRevenue(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/revenue/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.revenue;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchInsight(context) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/insight`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.insight;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 比對AI文字分析語氣與量化技術面結論是否一致,不一致時提醒
+function checkAISignalConsistency(aiSentiment, quantConclusion) {
+  if (!aiSentiment || !quantConclusion) return null;
+  const quantDir = quantConclusion.includes('偏多') ? '偏多' : quantConclusion.includes('偏空') ? '偏空' : '中性';
+  const aiDir = aiSentiment.includes('偏多') ? '偏多' : aiSentiment.includes('偏空') ? '偏空' : '中性';
+  if (quantDir === '中性' || aiDir === '中性') return null;
+  if (quantDir !== aiDir) return `⚠️AI文字分析語氣(${aiDir})與量化技術面結論(${quantDir})方向不一致,建議進一步確認後再參考`;
+  return null;
+}
+
 async function fetchIntraday(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/intraday/${code}`);
@@ -652,17 +701,17 @@ function Gauge({ score, conclusion }) {
 function StatBox({ label, value, sub, color }) {
   return (
     <div style={{ background: COLORS.cardRaised, borderRadius: 10, padding: '10px 12px', flex: '1 1 45%', minWidth: 130 }}>
-      <div style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 16, fontWeight: 700, color: color || COLORS.textPrimary }}>{value}</div>
-      {sub && <div style={{ fontSize: 11, color: COLORS.textSecondary, marginTop: 2 }}>{sub}</div>}
+      <div style={{ fontSize: 12, color: COLORS.textSecondary, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 17, fontWeight: 700, color: color || COLORS.textPrimary }}>{value}</div>
+      {sub && <div style={{ fontSize: 12, color: COLORS.textSecondary, marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
 
 function InfoLine({ label, children, color }) {
   return (
-    <div style={{ marginTop: 10, fontSize: 13, lineHeight: 1.7, color: color || COLORS.textPrimary }}>
-      {label && <span style={{ color: COLORS.textMuted }}>{label}:</span>} {children}
+    <div style={{ marginTop: 10, fontSize: 14, lineHeight: 1.8, color: color || COLORS.textPrimary }}>
+      {label && <span style={{ color: COLORS.textSecondary, fontWeight: 600 }}>{label}:</span>} {children}
     </div>
   );
 }
@@ -750,6 +799,8 @@ function StockAnalyzer() {
   const [question, setQuestion] = useState('');
   const [askLoading, setAskLoading] = useState(false);
   const [askAnswer, setAskAnswer] = useState(null);
+  const [aiInsight, setAiInsight] = useState(null);
+  const [insightLoading, setInsightLoading] = useState(false);
   const [compareMode, setCompareMode] = useState(false);
   const [compareInput, setCompareInput] = useState('');
   const [compareResults, setCompareResults] = useState(null);
@@ -810,8 +861,8 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow, announcements] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned),
+    const [data, marginChange, dividend, disposition, flow, announcements, revenue] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${cleaned}」的資料,請確認代號是否正確`); return; }
@@ -826,7 +877,8 @@ function StockAnalyzer() {
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
-    setResult({ ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements });
+    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue };
+    setResult(fullResult);
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
 
@@ -836,6 +888,26 @@ function StockAnalyzer() {
         setGuestCount(newCount);
       } catch (e) { /* ignore */ }
     }
+
+    // 自動產生AI綜合分析(比照每日報表邏輯),並檢查與量化結論是否一致
+    setInsightLoading(true);
+    setAiInsight(null);
+    const contextParts = [];
+    contextParts.push(`股票:${fullResult.code} ${fullResult.name}(${fullResult.market})`);
+    contextParts.push(`現價:${fullResult.last},今日漲跌:${fullResult.dayChangePct != null ? fullResult.dayChangePct.toFixed(2) + '%' : '無資料'}`);
+    contextParts.push(`綜合判斷:${fullResult.conclusion}`);
+    if (fullResult.ma5 && fullResult.ma20) contextParts.push(`MA5=${fullResult.ma5.toFixed(2)}, MA20=${fullResult.ma20.toFixed(2)}`);
+    if (fullResult.kd) contextParts.push(`KD: K=${fullResult.kd.K}, D=${fullResult.kd.D}`);
+    if (fullResult.rsi != null) contextParts.push(`RSI(14)=${fullResult.rsi}`);
+    if (fullResult.macd) contextParts.push(`MACD柱狀圖=${fullResult.macd.hist}(${fullResult.macd.crossText})`);
+    if (fullResult.biasInfo) contextParts.push(`乖離率=${fullResult.biasInfo.bias}%`);
+    if (fullResult.volRatio != null) contextParts.push(`量比=${fullResult.volRatio}倍`);
+    if (revenue) contextParts.push(`月營收年增${revenue.yoy}%、月增${revenue.mom}%、產業別:${revenue.industry}`);
+    if (flow) contextParts.push(`三大法人今日:外資${flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${flow.trustNet >= 0 ? '買超' : '賣超'}`);
+    if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
+    const insight = await fetchInsight(contextParts.join('\n'));
+    setInsightLoading(false);
+    if (insight) setAiInsight(insight);
   }, [isLoggedIn]);
 
   const addToWatchlist = () => {
@@ -1160,6 +1232,14 @@ function StockAnalyzer() {
               color={result.volRatio >= 2 ? COLORS.gold : undefined} />
           </div>
 
+          {result.revenue && (
+            <InfoLine label="基本面/題材面">
+              月營收年增 <span style={{ color: result.revenue.yoy >= 0 ? COLORS.up : COLORS.down, fontWeight: 700 }}>{result.revenue.yoy != null ? `${result.revenue.yoy}%` : '無資料'}</span>、
+              月增 {result.revenue.mom != null ? `${result.revenue.mom}%` : '無資料'}
+              {result.revenue.industry && <span>、產業別:{result.revenue.industry}</span>}
+            </InfoLine>
+          )}
+
           {result.crossInfo && (
             <InfoLine label="均線交叉" color={COLORS.blue}>
               {result.crossInfo.statusText};目前{result.crossInfo.direction}
@@ -1269,6 +1349,21 @@ function StockAnalyzer() {
             </InfoLine>
           )}
 
+          <div style={{ marginTop: 16, background: COLORS.cardRaised, borderRadius: 10, padding: '12px 14px' }}>
+            <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>AI綜合分析</div>
+            {insightLoading && <div style={{ fontSize: 13, color: COLORS.textSecondary }}>AI分析中...</div>}
+            {aiInsight && !insightLoading && (
+              <>
+                <div style={{ fontSize: 13, lineHeight: 1.8, color: COLORS.textPrimary }}>{aiInsight.analysis}</div>
+                {(() => {
+                  const warning = checkAISignalConsistency(aiInsight.sentiment, result.conclusion);
+                  return warning ? <div style={{ marginTop: 6, fontSize: 12, color: COLORS.orange, fontWeight: 700 }}>{warning}</div> : null;
+                })()}
+              </>
+            )}
+            {!aiInsight && !insightLoading && <div style={{ fontSize: 12, color: COLORS.textMuted }}>AI分析產生失敗,請參考上方數據</div>}
+          </div>
+
           <div style={{ marginTop: 16, borderTop: `0.5px solid ${COLORS.border}`, paddingTop: 12 }}>
             <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 8 }}>問問AI關於這檔股票</div>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -1293,12 +1388,20 @@ function StockAnalyzer() {
                 {askAnswer}
               </div>
             )}
-            <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※AI回答依據上方已查詢的資料生成,可能有誤判,非投資建議,僅供參考</div>
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※AI回答依據上方已查詢的資料生成,語言模型有機率產生「幻覺」(內容與實際數據不符),非投資建議,僅供參考</div>
           </div>
 
-          <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 14, lineHeight: 1.6 }}>
+          {result.tradingCost && (
+            <InfoLine label="交易成本試算">
+              一般交易來回約 {result.tradingCost.normal}%、當沖來回約 {result.tradingCost.dayTrade}%(官方標準費率未打折,需上漲超過此幅度才開始獲利,實際成本依您券商折扣而定)
+            </InfoLine>
+          )}
+
+          <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 14, lineHeight: 1.7 }}>
             以上為技術面客觀計算,並非投資建議,僅供參考。資料來源:Yahoo Finance、證交所(經代理伺服器轉發)。
             {updatedAt && <span> 更新時間:{updatedAt.toLocaleTimeString('zh-TW')}</span>}
+            <br /><br />
+            ※法人買賣超可能包含避險、ETF調整、大宗交易轉讓等非方向性因素,不完全代表「看多/看空」;技術指標(MA/KD/RSI/MACD)為業界通用預設參數,並未針對台股個別校準;本系統仰賴多個免費服務,查詢量大或市場劇烈波動時可能延遲或暫時無法使用。
           </div>
         </div>
       )}
