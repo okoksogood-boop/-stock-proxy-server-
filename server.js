@@ -137,7 +137,7 @@ app.get('/api/otc-name/:code', async (req, res) => {
 });
 
 // ---------- 個股重大訊息公告(官方公開資訊觀測站合法公開揭露,非內線消息) ----------
-const GEMINI_API_KEY = 'AQ.Ab8RN6KY4mTQgWnoKUlk3rQkFE_xU2hwrTcapMT2_pLM-x71cQ';
+const GROQ_API_KEY = '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';
 
 // ---------- 互動問答:根據已查詢到的股票資料回答使用者問題 ----------
 app.post('/api/ask', async (req, res) => {
@@ -145,27 +145,33 @@ app.post('/api/ask', async (req, res) => {
   if (!question || !context) return res.status(400).json({ error: '缺少必要參數' });
   try {
     const prompt = `你是一位台股分析助手。以下是某檔股票目前的數據資料:\n\n${context}\n\n使用者問題:${question}\n\n請根據以上資料回答,語氣像專業分析師一樣客觀中立,回答控制在150字以內。如果資料不足以回答,請誠實說明資料不足。請勿給出「保證上漲」「一定要買」「現在就賣」這類武斷確定性的投資建議,可以提供技術面/基本面/籌碼面的客觀解讀,並在回答最後提醒最終決策需自行判斷、非投資建議。`;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const url = 'https://api.groq.com/openai/v1/chat/completions';
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+      }),
     });
     const json = await r.json();
-    const answer = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const answer = json?.choices?.[0]?.message?.content;
     if (!answer) {
-      // 拿不到預期格式的回答時,把Gemini實際回傳的內容原封不動附上,方便排查問題(除錯用,之後穩定運作後可移除)
-      console.error('Gemini /api/ask 回應異常:', JSON.stringify(json));
+      // 拿不到預期格式的回答時,把實際回傳的內容原封不動附上,方便排查問題(除錯用,之後穩定運作後可移除)
+      console.error('Groq /api/ask 回應異常:', JSON.stringify(json));
       return res.json({ answer: `無法取得回答(除錯資訊,HTTP狀態:${r.status}):${JSON.stringify(json).slice(0, 500)}` });
     }
     return res.json({ answer });
   } catch (e) {
-    console.error('Gemini /api/ask 例外錯誤:', e);
+    console.error('Groq /api/ask 例外錯誤:', e);
     return res.status(500).json({ error: `AI回答失敗:${e.message}` });
   }
 });
 
-// ---------- AI情緒分析(呼叫Gemini API,判斷重大訊息利多/利空/中性;API金鑰只在伺服器端使用,不會暴露給瀏覽器) ----------
+// ---------- AI情緒分析(呼叫Groq API,判斷重大訊息利多/利空/中性;API金鑰只在伺服器端使用,不會暴露給瀏覽器) ----------
 async function getAnnouncementSentiment(items) {
   if (!items || items.length === 0) return {};
   try {
@@ -175,22 +181,27 @@ async function getAnnouncementSentiment(items) {
       if (text.length > 300) text = text.slice(0, 300);
       return { id: i, subject: text };
     });
-    const prompt = `你是台股分析助手。以下是股票重大訊息公告內容清單,請針對每一則判斷對股價可能是「利多」「利空」或「中性」,並給一句話簡短理由(15字以內)。請務必只回傳JSON陣列,格式如下,不要有其他文字說明:\n[{"id":0,"sentiment":"利多/利空/中性","reason":"簡短理由"}]\n\n公告清單:\n${JSON.stringify(itemsForPrompt)}`;
+    const prompt = `你是台股分析助手。以下是股票重大訊息公告內容清單,請針對每一則判斷對股價可能是「利多」「利空」或「中性」,並給一句話簡短理由(15字以內)。請務必只回傳JSON物件,格式如下,不要有其他文字說明:\n{"items":[{"id":0,"sentiment":"利多/利空/中性","reason":"簡短理由"}]}\n\n公告清單:\n${JSON.stringify(itemsForPrompt)}`;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    const url = 'https://api.groq.com/openai/v1/chat/completions';
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json' },
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
       }),
     });
     const json = await res.json();
-    let text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    let text = json?.choices?.[0]?.message?.content;
     if (!text) return {};
     text = text.replace(/^```json\s*/, '').replace(/```\s*$/, '');
-    const arr = JSON.parse(text);
+    const parsed = JSON.parse(text);
+    const arr = parsed.items || parsed;
     const map = {};
     for (const item of arr) map[item.id] = { sentiment: item.sentiment, reason: item.reason };
     return map;
