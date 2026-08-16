@@ -263,10 +263,21 @@ function analyze(closes, highs, lows, volumes) {
 
   const todayVolZhang = volumes && volumes.length ? Math.round(volumes[volumes.length - 1] / 1000) : null;
 
+  // 即將觸發提醒:現價與均線交叉價或建議停損價距離小於2%時提醒
+  let triggerAlert = null;
+  if (crossInfo && crossInfo.crossPrice) {
+    const dist = Math.abs((last - crossInfo.crossPrice) / last) * 100;
+    if (dist < 2) triggerAlert = `⚠️即將觸發:現價距離均線交叉價 ${crossInfo.crossPrice} 僅 ${dist.toFixed(2)}%(${crossInfo.statusText})`;
+  }
+  if (!triggerAlert && stopLoss) {
+    const dist2 = Math.abs((last - stopLoss.price) / last) * 100;
+    if (dist2 < 2) triggerAlert = `⚠️即將觸發:現價距離建議停損價 ${stopLoss.price} 僅 ${dist2.toFixed(2)}%`;
+  }
+
   return {
     last: +last.toFixed(2), dayChangePct, ma5, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
-    conclusion, score, todayVolZhang,
+    conclusion, score, todayVolZhang, triggerAlert,
   };
 }
 
@@ -739,6 +750,10 @@ function StockAnalyzer() {
   const [question, setQuestion] = useState('');
   const [askLoading, setAskLoading] = useState(false);
   const [askAnswer, setAskAnswer] = useState(null);
+  const [compareMode, setCompareMode] = useState(false);
+  const [compareInput, setCompareInput] = useState('');
+  const [compareResults, setCompareResults] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
   const nameMapRef = useRef(null);
 
   useEffect(() => {
@@ -857,6 +872,26 @@ function StockAnalyzer() {
     return parts.join('\n');
   };
 
+  const runCompare = async () => {
+    const codes = compareInput.split(/[,、\s]+/).map(c => c.trim()).filter(Boolean).slice(0, 3);
+    if (codes.length < 2) { setCompareResults({ error: '請至少輸入2檔股票代號(用逗號分隔),例如:2330,2454' }); return; }
+    setCompareLoading(true);
+    setCompareResults(null);
+
+    const results = [];
+    for (const code of codes) {
+      const data = await fetchStock(code);
+      if (!data) { results.push({ code, error: true }); continue; }
+      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes);
+      let chineseName = nameMapRef.current && nameMapRef.current[data.code];
+      if (!chineseName) chineseName = await fetchOtcName(code);
+      if (!chineseName) chineseName = data.name;
+      results.push({ ...data, name: chineseName, ...analysis });
+    }
+    setCompareResults({ items: results });
+    setCompareLoading(false);
+  };
+
   const askQuestion = async () => {
     const q = question.trim();
     if (!q) { return; }
@@ -909,6 +944,18 @@ function StockAnalyzer() {
         </div>
       </div>
 
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        <button onClick={() => setCompareMode(false)} style={{
+          background: !compareMode ? COLORS.gold : 'transparent', color: !compareMode ? '#1a1408' : COLORS.textMuted,
+          border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+        }}>單股查詢</button>
+        <button onClick={() => setCompareMode(true)} style={{
+          background: compareMode ? COLORS.gold : 'transparent', color: compareMode ? '#1a1408' : COLORS.textMuted,
+          border: `0.5px solid ${COLORS.border}`, borderRadius: 6, padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+        }}>多股比較</button>
+      </div>
+
+      {!compareMode && (
       <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
         <input
           value={input}
@@ -928,6 +975,79 @@ function StockAnalyzer() {
           }}
         >查詢</button>
       </div>
+      )}
+
+      {compareMode && (
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            value={compareInput}
+            onChange={e => setCompareInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && runCompare()}
+            placeholder="輸入2-3檔股票代號,用逗號分隔,例如:2330,2454,2317"
+            style={{
+              flex: 1, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 8,
+              padding: '6px 10px', color: COLORS.textPrimary, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", outline: 'none',
+            }}
+          />
+          <button
+            onClick={runCompare}
+            style={{
+              background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 8,
+              padding: '0 14px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            }}
+          >比較</button>
+        </div>
+
+        {compareLoading && (
+          <div style={{ textAlign: 'center', color: COLORS.textSecondary, padding: '30px 0', fontSize: 13 }}>比較中...</div>
+        )}
+
+        {compareResults && compareResults.error && (
+          <div style={{ marginTop: 10, background: COLORS.card, border: `0.5px solid ${COLORS.up}`, borderRadius: 10, padding: 14, fontSize: 13, color: COLORS.up }}>
+            {compareResults.error}
+          </div>
+        )}
+
+        {compareResults && compareResults.items && (
+          <div style={{ display: 'flex', gap: 10, marginTop: 12, overflowX: 'auto' }}>
+            {compareResults.items.map((r, i) => (
+              <div key={i} style={{ minWidth: 200, flex: '1 1 0', background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 12, padding: 14 }}>
+                {r.error ? (
+                  <div style={{ color: COLORS.up, fontSize: 13 }}>{r.code}:查無資料</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, color: COLORS.textMuted }}>{r.code}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 6 }}>{r.name}</div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: COLORS.gold }}>{r.last}</div>
+                    {r.dayChangePct != null && (
+                      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: r.dayChangePct >= 0 ? COLORS.up : COLORS.down, marginBottom: 8 }}>
+                        {r.dayChangePct >= 0 ? '▲' : '▼'}{Math.abs(r.dayChangePct).toFixed(2)}%
+                      </div>
+                    )}
+                    <div style={{ fontSize: 13, fontWeight: 700, color: r.score === 1 ? COLORS.up : r.score === -1 ? COLORS.down : COLORS.textSecondary, marginBottom: 8 }}>
+                      {r.conclusion}
+                    </div>
+                    <div style={{ fontSize: 11, color: COLORS.textSecondary, lineHeight: 1.8 }}>
+                      MA5/MA20:{r.ma5 && r.ma20 ? `${r.ma5.toFixed(1)} / ${r.ma20.toFixed(1)}` : '—'}<br />
+                      KD:{r.kd ? `${r.kd.K} / ${r.kd.D}` : '—'}<br />
+                      RSI:{r.rsi ?? '—'}<br />
+                      乖離率:{r.biasInfo ? `${r.biasInfo.bias}%` : '—'}<br />
+                      量比:{r.volRatio ?? '—'}<br />
+                      {r.stopLoss && <span style={{ color: COLORS.blue }}>停損價:{r.stopLoss.price}</span>}
+                    </div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 8 }}>以上為技術面客觀計算,並非投資建議,僅供參考</div>
+      </div>
+      )}
+
+      {!compareMode && (
+      <>
 
       {showLogs && isLoggedIn && (
         <div style={{ background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 12, padding: 14, marginBottom: 16, fontSize: 12 }}>
@@ -1068,6 +1188,12 @@ function StockAnalyzer() {
             <InfoLine label="成交量">{result.todayVolZhang} 張</InfoLine>
           )}
 
+          {result.triggerAlert && (
+            <div style={{ marginTop: 10, background: 'rgba(255,171,92,0.15)', border: `1px solid ${COLORS.orange}`, borderRadius: 8, padding: '10px 12px', fontSize: 13, color: COLORS.orange, fontWeight: 700 }}>
+              {result.triggerAlert}
+            </div>
+          )}
+
           {result.volumeDivergence && (
             <InfoLine color={result.volumeDivergence.color}>{result.volumeDivergence.text}</InfoLine>
           )}
@@ -1182,6 +1308,8 @@ function StockAnalyzer() {
           輸入股票代號並按查詢,即可看到即時技術面分析<br />
           (上市股票直接輸入代號,上櫃股票會自動嘗試)
         </div>
+      )}
+      </>
       )}
     </div>
   );
