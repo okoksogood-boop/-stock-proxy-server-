@@ -508,11 +508,11 @@ async function fetchInsight(context) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ context }),
     });
-    if (!res.ok) return null;
     const data = await res.json();
-    return data.insight;
+    if (!res.ok) return { insight: null, debug: `HTTP狀態:${res.status}` };
+    return data;
   } catch (e) {
-    return null;
+    return { insight: null, debug: `前端請求失敗:${e.message}` };
   }
 }
 
@@ -801,6 +801,7 @@ function StockAnalyzer() {
   const [askAnswer, setAskAnswer] = useState(null);
   const [aiInsight, setAiInsight] = useState(null);
   const [insightLoading, setInsightLoading] = useState(false);
+  const [insightDebug, setInsightDebug] = useState(null);
   const [compareMode, setCompareMode] = useState(false);
   const [compareInput, setCompareInput] = useState('');
   const [compareResults, setCompareResults] = useState(null);
@@ -892,6 +893,7 @@ function StockAnalyzer() {
     // 自動產生AI綜合分析(比照每日報表邏輯),並檢查與量化結論是否一致
     setInsightLoading(true);
     setAiInsight(null);
+    setInsightDebug(null);
     const contextParts = [];
     contextParts.push(`股票:${fullResult.code} ${fullResult.name}(${fullResult.market})`);
     contextParts.push(`現價:${fullResult.last},今日漲跌:${fullResult.dayChangePct != null ? fullResult.dayChangePct.toFixed(2) + '%' : '無資料'}`);
@@ -905,9 +907,13 @@ function StockAnalyzer() {
     if (revenue) contextParts.push(`月營收年增${revenue.yoy}%、月增${revenue.mom}%、產業別:${revenue.industry}`);
     if (flow) contextParts.push(`三大法人今日:外資${flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${flow.trustNet >= 0 ? '買超' : '賣超'}`);
     if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
-    const insight = await fetchInsight(contextParts.join('\n'));
+    const insightResult = await fetchInsight(contextParts.join('\n'));
     setInsightLoading(false);
-    if (insight) setAiInsight(insight);
+    if (insightResult && insightResult.insight) {
+      setAiInsight(insightResult.insight);
+    } else {
+      setInsightDebug(insightResult ? insightResult.debug : null);
+    }
   }, [isLoggedIn]);
 
   const addToWatchlist = () => {
@@ -1361,7 +1367,12 @@ function StockAnalyzer() {
                 })()}
               </>
             )}
-            {!aiInsight && !insightLoading && <div style={{ fontSize: 12, color: COLORS.textMuted }}>AI分析產生失敗,請參考上方數據</div>}
+            {!aiInsight && !insightLoading && (
+              <div style={{ fontSize: 12, color: COLORS.textMuted }}>
+                AI分析產生失敗,請參考上方數據
+                {insightDebug && <div style={{ fontSize: 10, color: COLORS.up, marginTop: 4, wordBreak: 'break-all' }}>{insightDebug}</div>}
+              </div>
+            )}
           </div>
 
           <div style={{ marginTop: 16, borderTop: `0.5px solid ${COLORS.border}`, paddingTop: 12 }}>
