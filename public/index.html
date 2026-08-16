@@ -578,8 +578,9 @@ function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, cod
       return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(d); // sv-SE格式剛好是yyyy-MM-dd
     };
 
+    const r2 = (v) => v == null ? v : +v.toFixed(2);
     const candleData = opens.map((o, i) => ({
-      time: toDateStr(timestamps[i]), open: o, high: highs[i], low: lows[i], close: closes[i],
+      time: toDateStr(timestamps[i]), open: r2(o), high: r2(highs[i]), low: r2(lows[i]), close: r2(closes[i]),
     }));
     const volumeData = volumes.map((v, i) => ({
       time: toDateStr(timestamps[i]), value: v,
@@ -625,15 +626,19 @@ function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, cod
     };
 
     priceBoxRef.current.innerHTML = '';
-    const priceChart = LightweightCharts.createChart(priceBoxRef.current, { ...commonOpts, height: 220 });
+    const priceChart = LightweightCharts.createChart(priceBoxRef.current, {
+      ...commonOpts, height: 220,
+      rightPriceScale: { borderColor: COLORS.border, entireTextOnly: true },
+    });
     const candleSeries = priceChart.addCandlestickSeries({
       upColor: COLORS.up, downColor: COLORS.down, borderVisible: false,
       wickUpColor: COLORS.up, wickDownColor: COLORS.down,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
     });
     candleSeries.setData(candleData);
-    const ma5Series = priceChart.addLineSeries({ color: COLORS.gold, lineWidth: 1 });
+    const ma5Series = priceChart.addLineSeries({ color: COLORS.gold, lineWidth: 1, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
     ma5Series.setData(smaLine(5));
-    const ma20Series = priceChart.addLineSeries({ color: '#7fa8ff', lineWidth: 1 });
+    const ma20Series = priceChart.addLineSeries({ color: '#7fa8ff', lineWidth: 1, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
     ma20Series.setData(smaLine(20));
     priceChart.timeScale().fitContent();
 
@@ -645,11 +650,11 @@ function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, cod
 
     rsiBoxRef.current.innerHTML = '';
     const rsiChart = LightweightCharts.createChart(rsiBoxRef.current, { ...commonOpts, height: 90 });
-    const rsiSeries = rsiChart.addLineSeries({ color: '#c77dff', lineWidth: 2 });
+    const rsiSeries = rsiChart.addLineSeries({ color: '#c77dff', lineWidth: 2, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
     rsiSeries.setData(rsiLine);
-    const upperBand = rsiChart.addLineSeries({ color: 'rgba(255,82,82,0.4)', lineWidth: 1, lineStyle: 2 });
+    const upperBand = rsiChart.addLineSeries({ color: 'rgba(255,82,82,0.4)', lineWidth: 1, lineStyle: 2, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
     upperBand.setData(rsiLine.map(p => ({ time: p.time, value: 70 })));
-    const lowerBand = rsiChart.addLineSeries({ color: 'rgba(46,204,113,0.4)', lineWidth: 1, lineStyle: 2 });
+    const lowerBand = rsiChart.addLineSeries({ color: 'rgba(46,204,113,0.4)', lineWidth: 1, lineStyle: 2, priceFormat: { type: 'price', precision: 2, minMove: 0.01 } });
     lowerBand.setData(rsiLine.map(p => ({ time: p.time, value: 30 })));
     rsiChart.timeScale().fitContent();
 
