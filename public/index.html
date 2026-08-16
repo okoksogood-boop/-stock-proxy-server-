@@ -340,6 +340,25 @@ function incrementGuestCount() {
   return newCount;
 }
 
+// 訪客問AI次數:每天(以台北時區為準)自動重置,與搜尋次數分開計算,避免問AI功能被無限濫用消耗API額度
+function getGuestAskCountToday() {
+  const today = getTaipeiDateStr();
+  const storedDate = localStorage.getItem('tw_stock_guest_ask_date');
+  if (storedDate !== today) {
+    localStorage.setItem('tw_stock_guest_ask_date', today);
+    localStorage.setItem('tw_stock_guest_ask_count', '0');
+    return 0;
+  }
+  return parseInt(localStorage.getItem('tw_stock_guest_ask_count') || '0', 10);
+}
+
+function incrementGuestAskCount() {
+  const newCount = getGuestAskCountToday() + 1;
+  localStorage.setItem('tw_stock_guest_ask_date', getTaipeiDateStr());
+  localStorage.setItem('tw_stock_guest_ask_count', String(newCount));
+  return newCount;
+}
+
 // 判斷現在是否為台股交易時段(週一~週五 09:00-13:30,以台北時區為準)
 function isTradingWindow() {
   const now = new Date();
@@ -640,6 +659,7 @@ function InfoLine({ label, children, color }) {
 const VALID_USERNAME = '1111';
 const VALID_PASSWORD = '5168';
 const GUEST_SEARCH_LIMIT = 10;
+const GUEST_ASK_LIMIT = 5;
 
 function LoginBadge({ isLoggedIn, onLogin, onLogout, guestCount, onShowLogs }) {
   const [showForm, setShowForm] = useState(false);
@@ -716,6 +736,9 @@ function StockAnalyzer() {
   const [showLogs, setShowLogs] = useState(false);
   const [adminLogs, setAdminLogs] = useState(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [askLoading, setAskLoading] = useState(false);
+  const [askAnswer, setAskAnswer] = useState(null);
   const nameMapRef = useRef(null);
 
   useEffect(() => {
@@ -805,6 +828,65 @@ function StockAnalyzer() {
     if (!result) return;
     if (watchlist.includes(result.code)) return;
     saveWatchlist([...watchlist, result.code]);
+  };
+
+  const buildContext = () => {
+    if (!result) return '';
+    const parts = [];
+    parts.push(`股票:${result.code} ${result.name}(${result.market})`);
+    parts.push(`現價:${result.last},今日漲跌:${result.dayChangePct != null ? result.dayChangePct.toFixed(2) + '%' : '無資料'}`);
+    parts.push(`綜合判斷:${result.conclusion}`);
+    if (result.ma5 && result.ma20) parts.push(`MA5=${result.ma5.toFixed(2)}, MA20=${result.ma20.toFixed(2)}`);
+    if (result.kd) parts.push(`KD: K=${result.kd.K}, D=${result.kd.D}`);
+    if (result.rsi != null) parts.push(`RSI(14)=${result.rsi}`);
+    if (result.macd) parts.push(`MACD柱狀圖=${result.macd.hist}(${result.macd.crossText})`);
+    if (result.biasInfo) parts.push(`乖離率=${result.biasInfo.bias}%(${result.biasInfo.warning || '正常'})`);
+    if (result.volRatio != null) parts.push(`量比=${result.volRatio}倍`);
+    if (result.stopLoss) parts.push(`建議停損價=${result.stopLoss.price}(依據:${result.stopLoss.basis})`);
+    if (result.flow) parts.push(`三大法人今日:外資${result.flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${result.flow.trustNet >= 0 ? '買超' : '賣超'}、自營商${result.flow.dealerNet >= 0 ? '買超' : '賣超'}`);
+    const streakParts = [];
+    if (result.foreignStreak?.days > 1) streakParts.push(`外資連${result.foreignStreak.days}日${result.foreignStreak.direction}`);
+    if (result.trustStreak?.days > 1) streakParts.push(`投信連${result.trustStreak.days}日${result.trustStreak.direction}`);
+    if (result.dealerStreak?.days > 1) streakParts.push(`自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}`);
+    if (streakParts.length > 0) parts.push(`連續買賣天數:${streakParts.join('、')}`);
+    if (result.marginChange != null) parts.push(`散戶融資:${result.marginChange >= 0 ? '增加' : '減少'}`);
+    if (result.disposition && result.disposition.period) parts.push(`⚠️注意:此股票目前為處置股,交易方式受限,處置期間${result.disposition.period}`);
+    if (result.announcements && result.announcements.length > 0) {
+      parts.push('近期重大訊息:' + result.announcements.slice(0, 3).map(a => `[${a.date}]${a.subject}${a.sentiment ? `(AI判讀:${a.sentiment})` : ''}`).join('; '));
+    }
+    return parts.join('\n');
+  };
+
+  const askQuestion = async () => {
+    const q = question.trim();
+    if (!q) { return; }
+    if (!result) { setAskAnswer('請先查詢一檔股票,才能針對該股票提問'); return; }
+
+    if (!isLoggedIn && isTradingWindow()) {
+      const askCount = getGuestAskCountToday();
+      if (askCount >= GUEST_ASK_LIMIT) {
+        setAskAnswer(`交易時段訪客問AI次數已達上限(${GUEST_ASK_LIMIT}次),交易時段結束後或明日開盤前不受限制,或請登入解鎖無限次提問`);
+        return;
+      }
+    }
+
+    setAskLoading(true); setAskAnswer(null);
+    try {
+      const context = buildContext();
+      const res = await fetch(`${PROXY_BASE}/api/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, context }),
+      });
+      const data = await res.json();
+      setAskAnswer(data.answer || '無法取得回答');
+      if (!isLoggedIn && isTradingWindow()) {
+        try { incrementGuestAskCount(); } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      setAskAnswer('提問失敗,請稍後再試');
+    }
+    setAskLoading(false);
   };
   const removeFromWatchlist = (code) => {
     saveWatchlist(watchlist.filter(c => c !== code));
@@ -1023,12 +1105,20 @@ function StockAnalyzer() {
             <div style={{ marginTop: 12, background: COLORS.cardRaised, borderRadius: 10, padding: '10px 14px' }}>
               <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>最新重大訊息公告</div>
               {result.announcements.map((a, i) => (
-                <div key={i} style={{ fontSize: 12, marginBottom: i < result.announcements.length - 1 ? 6 : 0, lineHeight: 1.5 }}>
+                <div key={i} style={{ fontSize: 12, marginBottom: i < result.announcements.length - 1 ? 10 : 0, lineHeight: 1.5 }}>
                   <span style={{ color: COLORS.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>{a.date}</span>{' '}
                   <span style={{ color: COLORS.yellow }}>{a.subject}</span>
+                  {a.sentiment && (
+                    <div style={{ marginTop: 3 }}>
+                      <span style={{ color: a.sentiment === '利多' ? COLORS.up : a.sentiment === '利空' ? COLORS.down : COLORS.textSecondary, fontWeight: 700 }}>
+                        [{a.sentiment}]
+                      </span>{' '}
+                      <span style={{ color: COLORS.textSecondary }}>{a.reason}</span>
+                    </div>
+                  )}
                 </div>
               ))}
-              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※資料來源:公開資訊觀測站,依法公開揭露之重大訊息,非即時新聞、非內線消息</div>
+              <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※資料來源:公開資訊觀測站,依法公開揭露之重大訊息,非即時新聞、非內線消息;情緒分析由Gemini AI自動判讀,非投資建議,僅供參考</div>
             </div>
           )}
 
@@ -1052,6 +1142,33 @@ function StockAnalyzer() {
               {result.tomorrowOutlook}
             </InfoLine>
           )}
+
+          <div style={{ marginTop: 16, borderTop: `0.5px solid ${COLORS.border}`, paddingTop: 12 }}>
+            <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 8 }}>問問AI關於這檔股票</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                value={question}
+                onChange={e => setQuestion(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && askQuestion()}
+                placeholder="例如:目前適合進場嗎?"
+                style={{
+                  flex: 1, background: COLORS.cardRaised, border: `0.5px solid ${COLORS.border}`, borderRadius: 8,
+                  padding: '7px 10px', color: COLORS.textPrimary, fontSize: 13, outline: 'none',
+                }}
+              />
+              <button onClick={askQuestion} style={{
+                background: COLORS.gold, color: '#1a1408', border: 'none', borderRadius: 8,
+                padding: '0 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              }}>問AI</button>
+            </div>
+            {askLoading && <div style={{ fontSize: 12, color: COLORS.textMuted, marginTop: 8 }}>AI思考中...</div>}
+            {askAnswer && !askLoading && (
+              <div style={{ marginTop: 8, background: COLORS.cardRaised, borderRadius: 8, padding: '10px 12px', fontSize: 13, lineHeight: 1.7, color: COLORS.textPrimary }}>
+                {askAnswer}
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 6 }}>※AI回答依據上方已查詢的資料生成,可能有誤判,非投資建議,僅供參考</div>
+          </div>
 
           <div style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 14, lineHeight: 1.6 }}>
             以上為技術面客觀計算,並非投資建議,僅供參考。資料來源:Yahoo Finance、證交所(經代理伺服器轉發)。
