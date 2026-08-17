@@ -562,6 +562,17 @@ async function fetchTwseNameMap() {
   }
 }
 
+// 將使用者輸入解析成股票代號:純數字/數字+字母視為代號直接使用;否則嘗試用中文名稱比對(優先完全符合,其次部分符合)
+function resolveStockCode(input, nameMap) {
+  if (/^[0-9]{4,6}[A-Za-z]?$/.test(input)) return input;
+  if (!nameMap) return input;
+  const exactEntry = Object.entries(nameMap).find(([, name]) => name === input);
+  if (exactEntry) return exactEntry[0];
+  const partialEntry = Object.entries(nameMap).find(([, name]) => name.includes(input));
+  if (partialEntry) return partialEntry[0];
+  return input;
+}
+
 // ================= UI元件 =================
 
 function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, code }) {
@@ -854,9 +865,10 @@ function StockAnalyzer() {
     try { localStorage.setItem('tw_stock_watchlist', JSON.stringify(list)); } catch (e) { /* ignore */ }
   }, []);
 
-  const runAnalysis = useCallback(async (code) => {
-    const cleaned = code.trim();
-    if (!cleaned) { setError('請輸入股票代號'); return; }
+  const runAnalysis = useCallback(async (rawInput) => {
+    const trimmedInput = rawInput.trim();
+    if (!trimmedInput) { setError('請輸入股票代號或中文名稱'); return; }
+    const cleaned = resolveStockCode(trimmedInput, nameMapRef.current);
 
     if (!isLoggedIn && isTradingWindow()) {
       const currentCount = getGuestCountToday();
@@ -871,7 +883,7 @@ function StockAnalyzer() {
       fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned),
     ]);
     setLoading(false);
-    if (!data) { setError(`查無「${cleaned}」的資料,請確認代號是否正確`); return; }
+    if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
 
     recordFlowHistory(cleaned, flow);
     const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
@@ -1044,7 +1056,7 @@ function StockAnalyzer() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && runAnalysis(input)}
-          placeholder="輸入股票代號,例如 2330"
+          placeholder="輸入股票代號或中文名稱,例如 2330 或 台積電"
           style={{
             flex: 1, background: COLORS.card, border: `0.5px solid ${COLORS.border}`, borderRadius: 8,
             padding: '6px 10px', color: COLORS.textPrimary, fontSize: 13, fontFamily: "'JetBrains Mono', monospace", outline: 'none',
@@ -1424,8 +1436,8 @@ function StockAnalyzer() {
 
       {!result && !loading && !error && (
         <div style={{ textAlign: 'center', color: COLORS.textMuted, padding: '40px 20px', fontSize: 13, lineHeight: 1.8 }}>
-          輸入股票代號並按查詢,即可看到即時技術面分析<br />
-          (上市股票直接輸入代號,上櫃股票會自動嘗試)
+          輸入股票代號或中文名稱並按查詢,即可看到即時技術面分析<br />
+          (上市股票可用代號或中文名稱搜尋,上櫃股票目前僅能用代號查詢)
         </div>
       )}
       </>
