@@ -1366,14 +1366,8 @@ function StockAnalyzer() {
             </InfoLine>
           )}
 
-          {result.tomorrowOutlook && (
-            <InfoLine color={result.tomorrowOutlook.includes('偏多') ? COLORS.up : result.tomorrowOutlook.includes('偏空') ? COLORS.down : COLORS.textSecondary}>
-              {result.tomorrowOutlook}
-            </InfoLine>
-          )}
-
           <div style={{ marginTop: 16, background: COLORS.cardRaised, borderRadius: 10, padding: '12px 14px' }}>
-            <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>AI綜合分析</div>
+            <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>AI分析(含短期展望)</div>
             {insightLoading && <div style={{ fontSize: 13, color: COLORS.textSecondary }}>AI分析中...</div>}
             {aiInsight && !insightLoading && (
               <>
@@ -1386,7 +1380,12 @@ function StockAnalyzer() {
             )}
             {!aiInsight && !insightLoading && (
               <div style={{ fontSize: 12, color: COLORS.textMuted }}>
-                AI分析產生失敗,請參考上方數據
+                {/* AI分析失敗時的備援:仍顯示規則式明日推測,確保這個欄位不會完全空白 */}
+                {result.tomorrowOutlook ? (
+                  <span style={{ color: result.tomorrowOutlook.includes('偏多') ? COLORS.up : result.tomorrowOutlook.includes('偏空') ? COLORS.down : COLORS.textSecondary }}>
+                    {result.tomorrowOutlook}
+                  </span>
+                ) : 'AI分析產生失敗,請參考上方數據'}
                 {insightDebug && <div style={{ fontSize: 10, color: COLORS.up, marginTop: 4, wordBreak: 'break-all' }}>{insightDebug}</div>}
               </div>
             )}
