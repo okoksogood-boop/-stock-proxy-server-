@@ -137,7 +137,7 @@ app.get('/api/otc-name/:code', async (req, res) => {
 });
 
 // ---------- 個股重大訊息公告(官方公開資訊觀測站合法公開揭露,非內線消息) ----------
-const GROQ_API_KEY = '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';
+const GROQ_API_KEY = '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';
 
 // ---------- 互動問答:根據已查詢到的股票資料回答使用者問題 ----------
 app.post('/api/ask', async (req, res) => {
