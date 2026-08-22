@@ -243,25 +243,46 @@ function computeTomorrowOutlook(ma5, ma20, kd, closes) {
   return `明日推測:${outlook}(KD動能:${kMomentum},短期價格動能:${priceMomentum})※僅為技術指標簡單推算,非保證,僅供參考`;
 }
 
-function analyze(closes, highs, lows, volumes) {
+// 還原股價:用「調整後收盤價/原始收盤價」的比例,同比例套用到當日High/Low,
+// 修正除權息造成的價格跳空,避免技術指標(KD/RSI/MACD/均線)在除權息日附近出現不代表真實漲跌的假訊號。
+// 若沒有adjCloses資料(例如舊快取或抓取失敗),則直接退回原始價格,不影響原本功能。
+function getAdjustedSeries(closes, highs, lows, adjCloses) {
+  if (!adjCloses || adjCloses.length !== closes.length) {
+    return { closes, highs, lows };
+  }
+  const adjC = [], adjH = [], adjL = [];
+  for (let i = 0; i < closes.length; i++) {
+    const c = closes[i];
+    const ac = (adjCloses[i] != null && c) ? adjCloses[i] : c;
+    const factor = c ? ac / c : 1;
+    adjC.push(ac);
+    adjH.push(highs[i] * factor);
+    adjL.push(lows[i] * factor);
+  }
+  return { closes: adjC, highs: adjH, lows: adjL };
+}
+
+function analyze(closes, highs, lows, volumes, adjCloses) {
   const n = closes.length;
-  const last = closes[n - 1];
+  const last = closes[n - 1]; // 現價一律顯示原始成交價,不用還原價(兩者在最新一天理論上相等)
   const prev = closes[n - 2];
   const dayChangePct = prev ? ((last - prev) / prev) * 100 : null;
 
-  const ma5 = sma(closes, 5);
-  const ma20 = sma(closes, 20);
-  const kd = computeKD(closes, highs, lows, 9);
-  const rsi = computeRSI(closes, 14);
-  const macd = computeMACD(closes);
+  // 技術指標計算改用還原股價序列,避免除權息造成的假跳空誤判
+  const adj = getAdjustedSeries(closes, highs, lows, adjCloses);
+  const ma5 = sma(adj.closes, 5);
+  const ma20 = sma(adj.closes, 20);
+  const kd = computeKD(adj.closes, adj.highs, adj.lows, 9);
+  const rsi = computeRSI(adj.closes, 14);
+  const macd = computeMACD(adj.closes);
   const biasInfo = computeBias(last, ma20);
-  const upDaysInfo = computeUpDays(closes, 5);
+  const upDaysInfo = computeUpDays(adj.closes, 5);
   const volTrend = computeVolTrend(volumes);
   const volRatio = computeVolumeRatio(volumes);
   const volumeDivergence = computeVolumeDivergence(dayChangePct, volTrend);
-  const crossInfo = computeCrossInfo(closes);
-  const stopLoss = computeStopLoss(closes, highs, lows, last);
-  const tomorrowOutlook = computeTomorrowOutlook(ma5, ma20, kd, closes);
+  const crossInfo = computeCrossInfo(adj.closes);
+  const stopLoss = computeStopLoss(adj.closes, adj.highs, adj.lows, last);
+  const tomorrowOutlook = computeTomorrowOutlook(ma5, ma20, kd, adj.closes);
 
   let conclusion = '資料不足', score = 0;
   if (ma5 != null && ma20 != null && kd) {
@@ -890,7 +911,7 @@ function StockAnalyzer() {
     const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
 
-    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes);
+    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
@@ -977,7 +998,7 @@ function StockAnalyzer() {
     for (const code of codes) {
       const data = await fetchStock(code);
       if (!data) { results.push({ code, error: true }); continue; }
-      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes);
+      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses);
       let chineseName = nameMapRef.current && nameMapRef.current[data.code];
       if (!chineseName) chineseName = await fetchOtcName(code);
       if (!chineseName) chineseName = data.name;
