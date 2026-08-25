@@ -52,6 +52,76 @@ function computeKD(closes, highs, lows, period = 9) {
   return { K: +K.toFixed(2), D: +D.toFixed(2), recentK: kHistory.slice(-3) };
 }
 
+// 起漲點判斷:「整理後帶量突破」+「K線反轉型態」兩者必須同時成立,單一條件不算,
+// 與每日報表PowerShell版本使用完全相同的邏輯與門檻值,確保兩邊判斷結果一致
+function computeConsolidationBreakout(closes, highs, lows, volumes, lookbackDays = 15) {
+  const n = closes.length;
+  if (n < lookbackDays + 1 || !volumes || volumes.length < lookbackDays + 1) return null;
+  const rangeHighs = highs.slice(n - 1 - lookbackDays, n - 1);
+  const rangeLows = lows.slice(n - 1 - lookbackDays, n - 1);
+  const rangeVols = volumes.slice(n - 1 - lookbackDays, n - 1);
+  const rangeHigh = Math.max(...rangeHighs);
+  const rangeLow = Math.min(...rangeLows);
+  const rangeAvgVol = rangeVols.reduce((a, b) => a + b, 0) / rangeVols.length;
+  if (rangeLow <= 0) return null;
+  const rangeWidthPct = ((rangeHigh - rangeLow) / rangeLow) * 100;
+  const isConsolidating = rangeWidthPct <= 10;
+  const todayClose = closes[n - 1];
+  const todayVol = volumes[n - 1];
+  const breaksHigh = todayClose > rangeHigh;
+  const volRatio = rangeAvgVol > 0 ? todayVol / rangeAvgVol : 0;
+  const volSurge = volRatio >= 1.5;
+  return {
+    isConsolidating, rangeWidthPct: +rangeWidthPct.toFixed(1), rangeHigh: +rangeHigh.toFixed(2),
+    breaksHigh, volRatio: +volRatio.toFixed(2), volSurge,
+    confirmed: isConsolidating && breaksHigh && volSurge,
+  };
+}
+
+function computeBullishCandlePattern(opens, highs, lows, closes) {
+  const n = closes.length;
+  if (n < 3 || !opens || opens.length < 3) return null;
+  const patterns = [];
+
+  const y = n - 2, t = n - 1;
+  const yBearish = closes[y] < opens[y];
+  const tBullish = closes[t] > opens[t];
+  if (yBearish && tBullish && opens[t] <= closes[y] && closes[t] >= opens[y]) {
+    patterns.push('長紅吞噬');
+  }
+
+  const d1 = n - 3, d2 = n - 2, d3 = n - 1;
+  const allBullish = closes[d1] > opens[d1] && closes[d2] > opens[d2] && closes[d3] > opens[d3];
+  const risingCloses = closes[d2] > closes[d1] && closes[d3] > closes[d2];
+  const opensWithinPrevBody = (opens[d2] >= opens[d1] && opens[d2] <= closes[d1]) && (opens[d3] >= opens[d2] && opens[d3] <= closes[d2]);
+  if (allBullish && risingCloses && opensWithinPrevBody) {
+    patterns.push('紅三兵');
+  }
+
+  const day1Bearish = closes[d1] < opens[d1];
+  const day1BodySize = Math.abs(opens[d1] - closes[d1]);
+  const day2BodySize = Math.abs(opens[d2] - closes[d2]);
+  const day3Bullish = closes[d3] > opens[d3];
+  const day3ClosesIntoDay1Body = closes[d3] > (opens[d1] + closes[d1]) / 2;
+  const day2IsSmall = day1BodySize > 0 && (day2BodySize / day1BodySize) < 0.4;
+  if (day1Bearish && day2IsSmall && day3Bullish && day3ClosesIntoDay1Body) {
+    patterns.push('早晨之星');
+  }
+
+  return { patterns, hasBullishPattern: patterns.length > 0 };
+}
+
+function computeRallyStartSignal(opens, highs, lows, closes, volumes) {
+  const breakout = computeConsolidationBreakout(closes, highs, lows, volumes);
+  const pattern = computeBullishCandlePattern(opens, highs, lows, closes);
+  if (!breakout || !pattern) return null;
+  const confirmed = breakout.confirmed && pattern.hasBullishPattern;
+  return {
+    confirmed, breakout, pattern,
+    summary: confirmed ? `🚀起漲點確認(整理後放量突破+${pattern.patterns.join('/')})` : null,
+  };
+}
+
 function computeRSI(closes, period = 14) {
   const n = closes.length;
   if (n < period + 1) return null;
@@ -246,11 +316,11 @@ function computeTomorrowOutlook(ma5, ma20, kd, closes) {
 // 還原股價:用「調整後收盤價/原始收盤價」的比例,同比例套用到當日High/Low,
 // 修正除權息造成的價格跳空,避免技術指標(KD/RSI/MACD/均線)在除權息日附近出現不代表真實漲跌的假訊號。
 // 若沒有adjCloses資料(例如舊快取或抓取失敗),則直接退回原始價格,不影響原本功能。
-function getAdjustedSeries(closes, highs, lows, adjCloses) {
+function getAdjustedSeries(closes, highs, lows, adjCloses, opens) {
   if (!adjCloses || adjCloses.length !== closes.length) {
-    return { closes, highs, lows };
+    return { closes, highs, lows, opens };
   }
-  const adjC = [], adjH = [], adjL = [];
+  const adjC = [], adjH = [], adjL = [], adjO = [];
   for (let i = 0; i < closes.length; i++) {
     const c = closes[i];
     const ac = (adjCloses[i] != null && c) ? adjCloses[i] : c;
@@ -258,18 +328,19 @@ function getAdjustedSeries(closes, highs, lows, adjCloses) {
     adjC.push(ac);
     adjH.push(highs[i] * factor);
     adjL.push(lows[i] * factor);
+    adjO.push(opens ? opens[i] * factor : null);
   }
-  return { closes: adjC, highs: adjH, lows: adjL };
+  return { closes: adjC, highs: adjH, lows: adjL, opens: adjO };
 }
 
-function analyze(closes, highs, lows, volumes, adjCloses) {
+function analyze(closes, highs, lows, volumes, adjCloses, opens) {
   const n = closes.length;
   const last = closes[n - 1]; // 現價一律顯示原始成交價,不用還原價(兩者在最新一天理論上相等)
   const prev = closes[n - 2];
   const dayChangePct = prev ? ((last - prev) / prev) * 100 : null;
 
   // 技術指標計算改用還原股價序列,避免除權息造成的假跳空誤判
-  const adj = getAdjustedSeries(closes, highs, lows, adjCloses);
+  const adj = getAdjustedSeries(closes, highs, lows, adjCloses, opens);
   const ma5 = sma(adj.closes, 5);
   const ma20 = sma(adj.closes, 20);
   const kd = computeKD(adj.closes, adj.highs, adj.lows, 9);
@@ -283,14 +354,22 @@ function analyze(closes, highs, lows, volumes, adjCloses) {
   const crossInfo = computeCrossInfo(adj.closes);
   const stopLoss = computeStopLoss(adj.closes, adj.highs, adj.lows, last);
   const tomorrowOutlook = computeTomorrowOutlook(ma5, ma20, kd, adj.closes);
+  const rallySignal = computeRallyStartSignal(adj.opens, adj.highs, adj.lows, adj.closes, volumes);
 
+  // 「偏多/偏空」結論改為三重確認(均線排列+KD交叉+量能未萎縮),與每日報表PowerShell版本邏輯一致,
+  // 理由:價漲量縮是常見假突破訊號,加入量能確認可過濾掉一部分雜訊。量能資料不足時退回雙重確認。
   let conclusion = '資料不足', score = 0;
   if (ma5 != null && ma20 != null && kd) {
     let bull = 0;
+    let requiredFactors = 2;
     if (ma5 > ma20) bull++;
     if (kd.K > kd.D) bull++;
-    conclusion = bull === 2 ? '偏多 ↑' : bull === 0 ? '偏空 ↓' : '中性/觀望 →';
-    score = bull === 2 ? 1 : bull === 0 ? -1 : 0;
+    if (volTrend !== '資料不足') {
+      requiredFactors = 3;
+      if (volTrend !== '近期量縮') bull++;
+    }
+    conclusion = bull === requiredFactors ? '偏多 ↑' : bull === 0 ? '偏空 ↓' : '中性/觀望 →';
+    score = bull === requiredFactors ? 1 : bull === 0 ? -1 : 0;
   }
 
   const todayVolZhang = volumes && volumes.length ? Math.round(volumes[volumes.length - 1] / 1000) : null;
@@ -311,7 +390,7 @@ function analyze(closes, highs, lows, volumes, adjCloses) {
   return {
     last: +last.toFixed(2), dayChangePct, ma5, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
-    conclusion, score, todayVolZhang, triggerAlert, tradingCost,
+    conclusion, score, todayVolZhang, triggerAlert, tradingCost, rallySignal,
   };
 }
 
@@ -911,7 +990,7 @@ function StockAnalyzer() {
     const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
 
-    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses);
+    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
@@ -998,7 +1077,7 @@ function StockAnalyzer() {
     for (const code of codes) {
       const data = await fetchStock(code);
       if (!data) { results.push({ code, error: true }); continue; }
-      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses);
+      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens);
       let chineseName = nameMapRef.current && nameMapRef.current[data.code];
       if (!chineseName) chineseName = await fetchOtcName(code);
       if (!chineseName) chineseName = data.name;
@@ -1254,6 +1333,11 @@ function StockAnalyzer() {
           <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
             volumes={result.volumes} timestamps={result.timestamps} name={result.name} code={result.code} />
           <Gauge score={result.score} conclusion={result.conclusion} />
+          {result.rallySignal && result.rallySignal.confirmed && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,171,92,0.15)', border: '1px solid rgba(255,171,92,0.4)', color: '#ffab5c', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              {result.rallySignal.summary}
+            </div>
+          )}
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
             <StatBox label="MA5 / MA20" value={result.ma5 && result.ma20 ? `${result.ma5.toFixed(2)} / ${result.ma20.toFixed(2)}` : '—'}
