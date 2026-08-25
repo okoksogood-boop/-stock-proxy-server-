@@ -65,12 +65,12 @@ function computeConsolidationBreakout(closes, highs, lows, volumes, lookbackDays
   const rangeAvgVol = rangeVols.reduce((a, b) => a + b, 0) / rangeVols.length;
   if (rangeLow <= 0) return null;
   const rangeWidthPct = ((rangeHigh - rangeLow) / rangeLow) * 100;
-  const isConsolidating = rangeWidthPct <= 10;
+  const isConsolidating = rangeWidthPct <= 15;
   const todayClose = closes[n - 1];
   const todayVol = volumes[n - 1];
   const breaksHigh = todayClose > rangeHigh;
   const volRatio = rangeAvgVol > 0 ? todayVol / rangeAvgVol : 0;
-  const volSurge = volRatio >= 1.5;
+  const volSurge = volRatio >= 1.0;
   return {
     isConsolidating, rangeWidthPct: +rangeWidthPct.toFixed(1), rangeHigh: +rangeHigh.toFixed(2),
     breaksHigh, volRatio: +volRatio.toFixed(2), volSurge,
