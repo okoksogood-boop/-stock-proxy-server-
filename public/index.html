@@ -1504,7 +1504,11 @@ function StockAnalyzer() {
             {insightLoading && <div style={{ fontSize: 13, color: COLORS.textSecondary }}>AI分析中...</div>}
             {aiInsight && !insightLoading && (
               <>
-                <div style={{ fontSize: 13, lineHeight: 1.8, color: COLORS.textPrimary }}>{aiInsight.analysis}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.9, color: COLORS.textPrimary }}>
+                  {aiInsight.analysis.split('▲').map((seg, i) => (
+                    <div key={i} style={{ marginBottom: 6 }}>{seg.trim()}</div>
+                  ))}
+                </div>
                 {(() => {
                   const warning = checkAISignalConsistency(aiInsight.sentiment, result.conclusion);
                   return warning ? <div style={{ marginTop: 6, fontSize: 12, color: COLORS.orange, fontWeight: 700 }}>{warning}</div> : null;
