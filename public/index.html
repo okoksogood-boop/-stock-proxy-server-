@@ -122,6 +122,57 @@ function computeRallyStartSignal(opens, highs, lows, closes, volumes) {
   };
 }
 
+// 突破前波段高:今日收盤價 > 過去60個交易日(不含今日)最高價
+function computeSwingHighBreakout(closes, highs, lookback = 60) {
+  const n = closes.length;
+  if (n < lookback + 1) return null;
+  const priorHigh = Math.max(...highs.slice(n - 1 - lookback, n - 1));
+  return { priorHigh: +priorHigh.toFixed(2), confirmed: closes[n - 1] > priorHigh };
+}
+
+// 飆股拉回均線:過去20日漲幅≥20%的強勢股,現價拉回接近MA5或MA10(±2%以內)
+function computeSurgePullbackToMA(closes, ma5, ma10, lookback = 20, surgeThreshold = 20) {
+  const n = closes.length;
+  if (n < lookback + 1 || ma5 == null || ma10 == null) return null;
+  const priorClose = closes[n - 1 - lookback];
+  if (priorClose <= 0) return null;
+  const surgePct = ((closes[n - 1] - priorClose) / priorClose) * 100;
+  const isSurgeStock = surgePct >= surgeThreshold;
+  const nearMA5 = Math.abs((closes[n - 1] - ma5) / ma5 * 100) <= 2;
+  const nearMA10 = Math.abs((closes[n - 1] - ma10) / ma10 * 100) <= 2;
+  const pullbackToMA = nearMA5 || nearMA10;
+  const maTouched = nearMA5 ? 'MA5' : (nearMA10 ? 'MA10' : null);
+  return { surgePct: +surgePct.toFixed(1), isSurgeStock, pullbackToMA, maTouched, confirmed: isSurgeStock && pullbackToMA };
+}
+
+// 均線糾結:MA5/MA10/MA20三條線彼此差距在3%以內
+function computeMAEntanglement(ma5, ma10, ma20, threshold = 3) {
+  if (ma5 == null || ma10 == null || ma20 == null) return null;
+  const vals = [ma5, ma10, ma20];
+  const maxV = Math.max(...vals);
+  const minV = Math.min(...vals);
+  if (minV <= 0) return null;
+  const spreadPct = ((maxV - minV) / minV) * 100;
+  return { spreadPct: +spreadPct.toFixed(2), confirmed: spreadPct <= threshold };
+}
+
+// 投信首購:過去20次紀錄(本機瀏覽器localStorage累積,與每日報表的本機CSV性質相同)內都沒有買超,今天由賣轉買
+function getTrustFirstBuy(code, lookback = 20) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const rows = all.filter((r) => r.code === code).sort((a, b) => b.date.localeCompare(a.date));
+    if (rows.length === 0) return null;
+    const todayVal = rows[0].trustNet;
+    if (todayVal == null || todayVal <= 0) return { confirmed: false };
+    const priorRows = rows.slice(1, 1 + lookback);
+    if (priorRows.length < lookback) return null; // 本機累積天數不足,無法判斷,不編造結果
+    const hadPriorBuy = priorRows.some((r) => r.trustNet > 0);
+    return { confirmed: !hadPriorBuy, checkedDays: priorRows.length };
+  } catch (e) {
+    return null;
+  }
+}
+
 function computeRSI(closes, period = 14) {
   const n = closes.length;
   if (n < period + 1) return null;
@@ -333,7 +384,7 @@ function getAdjustedSeries(closes, highs, lows, adjCloses, opens) {
   return { closes: adjC, highs: adjH, lows: adjL, opens: adjO };
 }
 
-function analyze(closes, highs, lows, volumes, adjCloses, opens) {
+function analyze(closes, highs, lows, volumes, adjCloses, opens, code) {
   const n = closes.length;
   const last = closes[n - 1]; // 現價一律顯示原始成交價,不用還原價(兩者在最新一天理論上相等)
   const prev = closes[n - 2];
@@ -342,6 +393,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens) {
   // 技術指標計算改用還原股價序列,避免除權息造成的假跳空誤判
   const adj = getAdjustedSeries(closes, highs, lows, adjCloses, opens);
   const ma5 = sma(adj.closes, 5);
+  const ma10 = sma(adj.closes, 10);
   const ma20 = sma(adj.closes, 20);
   const kd = computeKD(adj.closes, adj.highs, adj.lows, 9);
   const rsi = computeRSI(adj.closes, 14);
@@ -355,6 +407,10 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens) {
   const stopLoss = computeStopLoss(adj.closes, adj.highs, adj.lows, last);
   const tomorrowOutlook = computeTomorrowOutlook(ma5, ma20, kd, adj.closes);
   const rallySignal = computeRallyStartSignal(adj.opens, adj.highs, adj.lows, adj.closes, volumes);
+  const swingHighBreakout = computeSwingHighBreakout(adj.closes, adj.highs);
+  const surgePullback = computeSurgePullbackToMA(adj.closes, ma5, ma10);
+  const maEntanglement = computeMAEntanglement(ma5, ma10, ma20);
+  const trustFirstBuy = code ? getTrustFirstBuy(code) : null;
 
   // 「偏多/偏空」結論改為三重確認(均線排列+KD交叉+量能未萎縮),與每日報表PowerShell版本邏輯一致,
   // 理由:價漲量縮是常見假突破訊號,加入量能確認可過濾掉一部分雜訊。量能資料不足時退回雙重確認。
@@ -388,9 +444,10 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens) {
   const tradingCost = computeTradingCost();
 
   return {
-    last: +last.toFixed(2), dayChangePct, ma5, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
+    last: +last.toFixed(2), dayChangePct, ma5, ma10, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
     conclusion, score, todayVolZhang, triggerAlert, tradingCost, rallySignal,
+    swingHighBreakout, surgePullback, maEntanglement, trustFirstBuy,
   };
 }
 
@@ -1001,7 +1058,7 @@ function StockAnalyzer() {
     const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
 
-    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens);
+    const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens, data.code);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
@@ -1090,7 +1147,7 @@ function StockAnalyzer() {
     for (const code of codes) {
       const data = await fetchStock(code);
       if (!data) { results.push({ code, error: true }); continue; }
-      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens);
+      const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens, data.code);
       let chineseName = nameMapRef.current && nameMapRef.current[data.code];
       if (!chineseName) chineseName = await fetchOtcName(code);
       if (!chineseName) chineseName = data.name;
@@ -1349,6 +1406,26 @@ function StockAnalyzer() {
           {result.rallySignal && result.rallySignal.confirmed && (
             <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,171,92,0.15)', border: '1px solid rgba(255,171,92,0.4)', color: '#ffab5c', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
               {result.rallySignal.summary}
+            </div>
+          )}
+          {result.swingHighBreakout && result.swingHighBreakout.confirmed && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(90,168,232,0.15)', border: '1px solid rgba(90,168,232,0.4)', color: '#5aa8e8', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              📈突破前波段高(前高{result.swingHighBreakout.priorHigh}元,近60日最高)
+            </div>
+          )}
+          {result.surgePullback && result.surgePullback.confirmed && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(159,216,48,0.15)', border: '1px solid rgba(159,216,48,0.4)', color: '#9fd830', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              🎯飆股拉回買點(近20日已漲{result.surgePullback.surgePct}%,現價拉回貼近{result.surgePullback.maTouched})
+            </div>
+          )}
+          {result.trustFirstBuy && result.trustFirstBuy.confirmed && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(240,215,137,0.15)', border: '1px solid rgba(240,215,137,0.4)', color: '#f0d789', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              🆕投信首購(近{result.trustFirstBuy.checkedDays}個交易日無買超紀錄,今日由賣轉買;此為本機瀏覽器查詢紀錄,並非官方逐日資料)
+            </div>
+          )}
+          {result.maEntanglement && result.maEntanglement.confirmed && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(199,204,214,0.12)', border: '1px solid rgba(199,204,214,0.35)', color: '#c7ccd6', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              🔀均線糾結(MA5/MA10/MA20差距僅{result.maEntanglement.spreadPct}%,變盤前兆)
             </div>
           )}
 
