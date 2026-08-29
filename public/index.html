@@ -669,6 +669,17 @@ async function fetchRevenue(code) {
   }
 }
 
+async function fetchProfitability(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/profitability/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.profitability;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchInsight(context) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/insight`, {
@@ -1047,8 +1058,8 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow, announcements, revenue] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned),
+    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
@@ -1064,7 +1075,7 @@ function StockAnalyzer() {
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
     const news = await fetchNews(cleaned, chineseName);
-    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, news };
+    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news };
     setResult(fullResult);
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
@@ -1091,6 +1102,10 @@ function StockAnalyzer() {
     if (fullResult.biasInfo) contextParts.push(`乖離率=${fullResult.biasInfo.bias}%`);
     if (fullResult.volRatio != null) contextParts.push(`量比=${fullResult.volRatio}倍`);
     if (revenue) contextParts.push(`月營收年增${revenue.yoy}%、月增${revenue.mom}%、產業別:${revenue.industry}`);
+    if (profitability) {
+      const epsText = profitability.eps != null ? `、本年累計EPS ${profitability.eps}元` : '';
+      contextParts.push(`毛利率${profitability.grossMargin}%、營益率${profitability.operatingMargin}%${epsText}`);
+    }
     if (flow) contextParts.push(`三大法人今日:外資${flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${flow.trustNet >= 0 ? '買超' : '賣超'}`);
     if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
     if (news && news.length > 0) contextParts.push(`近期相關新聞標題:` + news.map(n => `[${n.date}]${n.title}(${n.source || ''})`).join('; '));
@@ -1455,6 +1470,14 @@ function StockAnalyzer() {
               月營收年增 <span style={{ color: result.revenue.yoy == null ? COLORS.textSecondary : (result.revenue.yoy >= 0 ? COLORS.up : COLORS.down), fontWeight: 700 }}>{result.revenue.yoy != null ? `${result.revenue.yoy}%` : '無資料'}</span>、
               月增 {result.revenue.mom != null ? `${result.revenue.mom}%` : '無資料'}
               {result.revenue.industry && <span>、產業別:{result.revenue.industry}</span>}
+            </InfoLine>
+          )}
+
+          {result.profitability && (
+            <InfoLine label="獲利品質">
+              毛利率 {result.profitability.grossMargin != null ? `${result.profitability.grossMargin}%` : '無資料'}、
+              營益率 {result.profitability.operatingMargin != null ? `${result.profitability.operatingMargin}%` : '無資料'}
+              {result.profitability.eps != null && <span>、本年累計EPS <span style={{ color: COLORS.gold, fontWeight: 700 }}>{result.profitability.eps}元</span></span>}
             </InfoLine>
           )}
 
