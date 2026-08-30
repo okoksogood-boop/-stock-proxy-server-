@@ -761,17 +761,6 @@ async function fetchRevenue(code) {
   }
 }
 
-async function fetchAnalystTarget(code) {
-  try {
-    const res = await fetch(`${PROXY_BASE}/api/analyst-target/${code}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.analystTarget;
-  } catch (e) {
-    return null;
-  }
-}
-
 async function fetchProfitability(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/profitability/${code}`);
@@ -1161,8 +1150,8 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, analystTarget] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(), fetchAnalystTarget(cleaned),
+    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
@@ -1180,7 +1169,7 @@ function StockAnalyzer() {
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
     const news = await fetchNews(cleaned, chineseName);
-    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo, analystTarget };
+    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo };
     setResult(fullResult);
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
@@ -1518,12 +1507,6 @@ function StockAnalyzer() {
                 {result.dayChangePct >= 0 ? '▲' : '▼'}{Math.abs(result.dayChangePct).toFixed(2)}%
               </div>
             )}
-          </div>
-          <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 4 }}>
-            {result.analystTarget ? (
-              <>分析師共識目標價:<span style={{ color: COLORS.gold, fontWeight: 700 }}>{result.analystTarget.meanPrice}</span>
-                (最高{result.analystTarget.highPrice}/最低{result.analystTarget.lowPrice},{result.analystTarget.numberOfAnalysts}位分析師{result.analystTarget.recommendation ? `,綜合評等:${result.analystTarget.recommendation}` : ''})</>
-            ) : '分析師共識目標價:暫無覆蓋(中小型股常見無國際分析師追蹤)'}
           </div>
 
           <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
