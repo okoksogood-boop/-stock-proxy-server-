@@ -1468,7 +1468,7 @@ function StockAnalyzer() {
           {result.revenue && (
             <InfoLine label="基本面/題材面">
               月營收年增 <span style={{ color: result.revenue.yoy == null ? COLORS.textSecondary : (result.revenue.yoy >= 0 ? COLORS.up : COLORS.down), fontWeight: 700 }}>{result.revenue.yoy != null ? `${result.revenue.yoy}%` : '無資料'}</span>、
-              月增 {result.revenue.mom != null ? `${result.revenue.mom}%` : '無資料'}
+              月增 <span style={{ color: result.revenue.mom == null ? COLORS.textSecondary : (result.revenue.mom >= 0 ? COLORS.up : COLORS.down), fontWeight: 700 }}>{result.revenue.mom != null ? `${result.revenue.mom}%` : '無資料'}</span>
               {result.revenue.industry && <span>、產業別:{result.revenue.industry}</span>}
             </InfoLine>
           )}
