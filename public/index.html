@@ -338,6 +338,83 @@ function computeStopLoss(closes, highs, lows, lastPrice) {
   return { price: primary.value, basis: primary.label, lossPct, detailText };
 }
 
+// VWAP(成交量加權平均價):跟每日報表同一套邏輯,近20日高低收均價依成交量加權
+function computeVWAP(closes, highs, lows, volumes, period = 20) {
+  if (closes.length < period || !volumes || volumes.length < period) return null;
+  const c = closes.slice(-period), h = highs.slice(-period), l = lows.slice(-period), v = volumes.slice(-period);
+  let sumPV = 0, sumV = 0;
+  for (let i = 0; i < period; i++) {
+    const typicalPrice = (h[i] + l[i] + c[i]) / 3;
+    sumPV += typicalPrice * v[i];
+    sumV += v[i];
+  }
+  if (sumV <= 0) return null;
+  const vwap = +(sumPV / sumV).toFixed(2);
+  const lastClose = closes[closes.length - 1];
+  const diffPct = +(((lastClose - vwap) / vwap) * 100).toFixed(2);
+  const posText = lastClose >= vwap ? `高於VWAP(站上近${period}日平均成交成本)` : `低於VWAP(跌破近${period}日平均成交成本)`;
+  return { vwap, diffPct, posText };
+}
+
+// 布林通道:跟每日報表同一套邏輯,20日均線±2倍標準差
+function computeBollingerBands(closes, period = 20, stdDevMultiplier = 2) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(-period);
+  const mean = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+  const stdDev = Math.sqrt(variance);
+  const upper = +(mean + stdDevMultiplier * stdDev).toFixed(2);
+  const lower = +(mean - stdDevMultiplier * stdDev).toFixed(2);
+  const mid = +mean.toFixed(2);
+  const lastClose = closes[closes.length - 1];
+  const bandWidthPct = mid > 0 ? +(((upper - lower) / mid) * 100).toFixed(1) : null;
+  let squeezeText;
+  if (bandWidthPct != null && bandWidthPct <= 10) squeezeText = `通道壓縮中(寬度僅${bandWidthPct}%,波動度偏低,留意變盤)`;
+  else if (bandWidthPct != null && bandWidthPct >= 30) squeezeText = `通道明顯擴張(寬度${bandWidthPct}%,波動度偏高)`;
+  else squeezeText = `通道寬度${bandWidthPct}%,波動度中等`;
+  let posText;
+  if (lastClose >= upper) posText = '觸及或突破上軌(短線強勢,但也可能過熱)';
+  else if (lastClose <= lower) posText = '觸及或跌破下軌(短線弱勢,但也可能超跌)';
+  else posText = '位於通道中間區域';
+  return { upper, mid, lower, bandWidthPct, squeezeText, posText };
+}
+
+// 週線趨勢確認:把日K聚合成週K(每5個交易日一根),跟每日報表同一套邏輯,避免逆週線大趨勢操作
+function computeWeeklyTrend(closes, weeksNeeded = 22) {
+  const daysNeeded = weeksNeeded * 5;
+  if (closes.length < daysNeeded) return null;
+  const weeklyCloses = [];
+  const n = closes.length;
+  const startIdx = n % 5;
+  for (let i = startIdx; i <= n - 5; i += 5) {
+    weeklyCloses.push(closes[i + 4]);
+  }
+  if (weeklyCloses.length < 20) return null;
+  const wMA5 = sma(weeklyCloses, 5);
+  const wMA20 = sma(weeklyCloses, 20);
+  if (wMA5 == null || wMA20 == null) return null;
+  const trend = wMA5 > wMA20 ? '週線偏多' : '週線偏空';
+  return { weeklyMA5: +wMA5.toFixed(2), weeklyMA20: +wMA20.toFixed(2), trend };
+}
+
+// 當沖成交值排名:跟每日報表同一套邏輯,依全市場成交值排名,前20顯示名次,其餘顯示實際成交值,處置股標註不能當沖
+function computeDayTradeInfo(code, snapshot, dispositionInfo) {
+  if (dispositionInfo) {
+    return { text: '不能當沖(處置股期間中,依現有資料判斷,僅能捕捉部分限制情況,實際是否可當沖請以官方公告為準)', isDisposition: true };
+  }
+  if (!snapshot || !Array.isArray(snapshot)) return null;
+  const ranked = snapshot
+    .map((row) => ({ code: row['證券代號'], tradeValue: parseFloat(row['成交金額']) || 0 }))
+    .filter((r) => r.tradeValue > 0)
+    .sort((a, b) => b.tradeValue - a.tradeValue);
+  const idx = ranked.findIndex((r) => r.code === code);
+  if (idx === -1) return null;
+  const rank = idx + 1;
+  if (rank <= 20) return { text: `當沖成交值排名:全市場第${rank}名`, rank };
+  const tradeValue = ranked[idx].tradeValue;
+  return { text: `當沖成交值:${(tradeValue / 100000000).toFixed(2)}億元`, tradeValue };
+}
+
 function computeTomorrowOutlook(ma5, ma20, kd, closes) {
   if (ma5 == null || ma20 == null || !kd) return null;
   const recentK = kd.recentK || [];
@@ -411,6 +488,9 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code) {
   const surgePullback = computeSurgePullbackToMA(adj.closes, ma5, ma10);
   const maEntanglement = computeMAEntanglement(ma5, ma10, ma20);
   const trustFirstBuy = code ? getTrustFirstBuy(code) : null;
+  const vwapInfo = computeVWAP(adj.closes, adj.highs, adj.lows, volumes);
+  const bollingerInfo = computeBollingerBands(adj.closes);
+  const weeklyTrendInfo = computeWeeklyTrend(adj.closes);
 
   // 「偏多/偏空」結論改為三重確認(均線排列+KD交叉+量能未萎縮),與每日報表PowerShell版本邏輯一致,
   // 理由:價漲量縮是常見假突破訊號,加入量能確認可過濾掉一部分雜訊。量能資料不足時退回雙重確認。
@@ -448,6 +528,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code) {
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
     conclusion, score, todayVolZhang, triggerAlert, tradingCost, rallySignal,
     swingHighBreakout, surgePullback, maEntanglement, trustFirstBuy,
+    vwapInfo, bollingerInfo, weeklyTrendInfo,
   };
 }
 
@@ -647,6 +728,17 @@ async function fetchDisposition(code) {
   }
 }
 
+// 全市場快照(用於當沖成交值排名計算),跟每日報表PowerShell版本同一份官方資料來源
+async function fetchTwseSnapshot() {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/twse/snapshot`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
 async function fetchAnnouncements(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/announcements/${code}`);
@@ -664,6 +756,17 @@ async function fetchRevenue(code) {
     if (!res.ok) return null;
     const data = await res.json();
     return data.revenue;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchAnalystTarget(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/analyst-target/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.analystTarget;
   } catch (e) {
     return null;
   }
@@ -1058,11 +1161,13 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability] = await Promise.all([
-      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned),
+    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, analystTarget] = await Promise.all([
+      fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(), fetchAnalystTarget(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
+
+    const dayTradeInfo = computeDayTradeInfo(data.code, twseSnapshot, disposition);
 
     recordFlowHistory(cleaned, flow);
     const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
@@ -1075,7 +1180,7 @@ function StockAnalyzer() {
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
     const news = await fetchNews(cleaned, chineseName);
-    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news };
+    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo, analystTarget };
     setResult(fullResult);
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
@@ -1312,7 +1417,7 @@ function StockAnalyzer() {
                       MA5/MA20:{r.ma5 && r.ma20 ? `${r.ma5.toFixed(1)} / ${r.ma20.toFixed(1)}` : '—'}<br />
                       KD:{r.kd ? `${r.kd.K} / ${r.kd.D}` : '—'}<br />
                       RSI:{r.rsi ?? '—'}<br />
-                      乖離率:{r.biasInfo ? `${r.biasInfo.bias}%` : '—'}<br />
+                      乖離率:<span style={{ color: r.biasInfo ? (r.biasInfo.bias >= 0 ? COLORS.up : COLORS.down) : COLORS.textSecondary }}>{r.biasInfo ? `${r.biasInfo.bias}%` : '—'}</span><br />
                       量比:{r.volRatio ?? '—'}<br />
                       {r.stopLoss && <span style={{ color: COLORS.blue }}>停損價:{r.stopLoss.price}</span>}
                     </div>
@@ -1414,6 +1519,12 @@ function StockAnalyzer() {
               </div>
             )}
           </div>
+          <div style={{ fontSize: 12.5, color: COLORS.textSecondary, marginTop: 4 }}>
+            {result.analystTarget ? (
+              <>分析師共識目標價:<span style={{ color: COLORS.gold, fontWeight: 700 }}>{result.analystTarget.meanPrice}</span>
+                (最高{result.analystTarget.highPrice}/最低{result.analystTarget.lowPrice},{result.analystTarget.numberOfAnalysts}位分析師{result.analystTarget.recommendation ? `,綜合評等:${result.analystTarget.recommendation}` : ''})</>
+            ) : '分析師共識目標價:暫無覆蓋(中小型股常見無國際分析師追蹤)'}
+          </div>
 
           <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
             volumes={result.volumes} timestamps={result.timestamps} name={result.name} code={result.code} />
@@ -1443,6 +1554,17 @@ function StockAnalyzer() {
               🔀均線糾結(MA5/MA10/MA20差距僅{result.maEntanglement.spreadPct}%,變盤前兆)
             </div>
           )}
+          {result.weeklyTrendInfo && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: result.weeklyTrendInfo.trend === '週線偏多' ? 'rgba(255,92,92,0.1)' : 'rgba(51,209,122,0.1)', border: `1px solid ${result.weeklyTrendInfo.trend === '週線偏多' ? 'rgba(255,92,92,0.35)' : 'rgba(51,209,122,0.35)'}`, color: result.weeklyTrendInfo.trend === '週線偏多' ? COLORS.up : COLORS.down, fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              週線趨勢:{result.weeklyTrendInfo.trend}(週MA5={result.weeklyTrendInfo.weeklyMA5}、週MA20={result.weeklyTrendInfo.weeklyMA20})
+              {((result.conclusion === '偏多 ↑' && result.weeklyTrendInfo.trend === '週線偏空') || (result.conclusion === '偏空 ↓' && result.weeklyTrendInfo.trend === '週線偏多')) && ' ⚠️與週線趨勢方向不同,留意逆勢風險'}
+            </div>
+          )}
+          {result.dayTradeInfo && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: result.dayTradeInfo.isDisposition ? 'rgba(255,92,92,0.1)' : 'rgba(240,215,137,0.1)', border: `1px solid ${result.dayTradeInfo.isDisposition ? 'rgba(255,92,92,0.35)' : 'rgba(240,215,137,0.35)'}`, color: result.dayTradeInfo.isDisposition ? COLORS.down : COLORS.gold, fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
+              {result.dayTradeInfo.text}
+            </div>
+          )}
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
             <StatBox label="MA5 / MA20" value={result.ma5 && result.ma20 ? `${result.ma5.toFixed(2)} / ${result.ma20.toFixed(2)}` : '—'}
@@ -1459,10 +1581,16 @@ function StockAnalyzer() {
               color={result.macd ? (result.macd.macd > result.macd.signal ? COLORS.up : COLORS.down) : undefined} />
             <StatBox label="乖離率(BIAS)" value={result.biasInfo ? `${result.biasInfo.bias}%` : '—'}
               sub={result.biasInfo ? result.biasInfo.warning : ''}
-              color={result.biasInfo && result.biasInfo.bias > 8 ? COLORS.orange : undefined} />
+              color={result.biasInfo ? (result.biasInfo.bias > 8 ? COLORS.orange : (result.biasInfo.bias >= 0 ? COLORS.up : COLORS.down)) : undefined} />
             <StatBox label="量比" value={result.volRatio ?? '—'}
               sub={result.volRatio >= 2 ? '成交量明顯放大' : (result.volTrend || '')}
               color={result.volRatio >= 2 ? COLORS.gold : undefined} />
+            <StatBox label="VWAP" value={result.vwapInfo ? result.vwapInfo.vwap : '—'}
+              sub={result.vwapInfo ? `${result.vwapInfo.posText}(${result.vwapInfo.diffPct}%)` : ''}
+              color={result.vwapInfo ? (result.vwapInfo.diffPct >= 0 ? COLORS.up : COLORS.down) : undefined} />
+            <StatBox label="布林通道" value={result.bollingerInfo ? `${result.bollingerInfo.lower} ~ ${result.bollingerInfo.upper}` : '—'}
+              sub={result.bollingerInfo ? result.bollingerInfo.squeezeText : ''}
+              color={result.bollingerInfo && result.bollingerInfo.bandWidthPct <= 10 ? COLORS.orange : undefined} />
           </div>
 
           {result.revenue && (
@@ -1499,7 +1627,7 @@ function StockAnalyzer() {
 
           {result.upDaysInfo && (
             <InfoLine label="追高風險檢視" color={COLORS.pink}>
-              {result.biasInfo ? `乖離率${result.biasInfo.bias}%${result.biasInfo.warning ? ` (${result.biasInfo.warning})` : ''}` : ''}、
+              {result.biasInfo ? <>乖離率<span style={{ color: result.biasInfo.bias >= 0 ? COLORS.up : COLORS.down }}>{result.biasInfo.bias}%</span>{result.biasInfo.warning ? ` (${result.biasInfo.warning})` : ''}</> : ''}、
               RSI(14)={result.rsi}{result.rsi > 80 ? ' ⚠️短線超買' : ''}、
               {result.upDaysInfo.label}
             </InfoLine>
