@@ -237,16 +237,20 @@ function computeBias(lastPrice, ma20) {
   return { bias, warning };
 }
 
+// 連續上漲/下跌天數:同時回報兩種方向的天數,不再只單向描述漲勢,與每日報表Get-RecentUpDays邏輯一致
 function computeUpDays(closes, lookback = 5) {
   if (closes.length < lookback + 1) return null;
-  let upDays = 0;
+  let upDays = 0, downDays = 0;
   for (let i = closes.length - lookback; i < closes.length; i++) {
     if (closes[i] > closes[i - 1]) upDays++;
+    else if (closes[i] < closes[i - 1]) downDays++;
   }
-  let label = `近5日漲${upDays}天`;
-  if (upDays >= 4) label += '(已連漲多日,追高風險較高)';
-  else if (upDays <= 1) label += '(可能為打底後首次突破)';
-  return { upDays, label };
+  let label;
+  if (upDays >= 4) label = `近5日漲${upDays}天(已連漲多日,追高風險較高)`;
+  else if (downDays >= 4) label = `近5日跌${downDays}天(已連續下跌多日,留意是否落底或持續破底)`;
+  else if (upDays <= 1 && downDays <= 1) label = `近5日漲${upDays}天跌${downDays}天(近期方向不明確)`;
+  else label = `近5日漲${upDays}天跌${downDays}天`;
+  return { upDays, downDays, label };
 }
 
 function computeVolTrend(volumes) {
@@ -397,6 +401,35 @@ function computeWeeklyTrend(closes, weeksNeeded = 22) {
   return { weeklyMA5: +wMA5.toFixed(2), weeklyMA20: +wMA20.toFixed(2), trend };
 }
 
+// 月線趨勢比對:個股資料只抓近6個月(約120個交易日),月線一根=20個交易日,最多約6根月K可用,
+// 所以刻意用比週線短的週期(2個月MA vs 4個月MA),否則資料量會完全不夠,永遠算不出來,與每日報表Get-MonthlyTrend邏輯一致
+function computeMonthlyTrend(closes, shortPeriod = 2, longPeriod = 4) {
+  const blockSize = 20;
+  if (closes.length < blockSize * (longPeriod + 1)) return null;
+  const monthlyCloses = [];
+  const n = closes.length;
+  for (let i = n; i > 0; i -= blockSize) {
+    const start = Math.max(0, i - blockSize);
+    monthlyCloses.unshift(closes.slice(start, i)[closes.slice(start, i).length - 1]);
+  }
+  if (monthlyCloses.length < longPeriod + 1) return null;
+  const shortMA = sma(monthlyCloses, shortPeriod);
+  const longMA = sma(monthlyCloses, longPeriod);
+  if (shortMA == null || longMA == null) return null;
+  const trend = shortMA > longMA ? '月線偏多' : shortMA < longMA ? '月線偏空' : '月線持平';
+  return { shortMA: +shortMA.toFixed(2), longMA: +longMA.toFixed(2), trend };
+}
+
+// 相對強弱RS:個股近N日報酬率減去大盤加權指數(TWII)同期報酬率,正值代表比大盤強,與每日報表Get-RelativeStrength邏輯一致
+function computeRelativeStrength(closes, benchmarkCloses, days = 20) {
+  if (closes.length < days + 1 || !benchmarkCloses || benchmarkCloses.length < days + 1) return null;
+  const stockReturn = ((closes[closes.length - 1] - closes[closes.length - 1 - days]) / closes[closes.length - 1 - days]) * 100;
+  const benchReturn = ((benchmarkCloses[benchmarkCloses.length - 1] - benchmarkCloses[benchmarkCloses.length - 1 - days]) / benchmarkCloses[benchmarkCloses.length - 1 - days]) * 100;
+  const rs = +(stockReturn - benchReturn).toFixed(2);
+  const label = rs > 0 ? '強於大盤' : rs < 0 ? '弱於大盤' : '與大盤同步';
+  return { stockReturn: +stockReturn.toFixed(2), benchmarkReturn: +benchReturn.toFixed(2), rs, label };
+}
+
 // 當沖成交值排名:跟每日報表同一套邏輯,依全市場成交值排名,前20顯示名次,其餘顯示實際成交值,處置股標註不能當沖
 function computeDayTradeInfo(code, snapshot, dispositionInfo) {
   if (dispositionInfo) {
@@ -491,6 +524,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code, liveQuote
   const vwapInfo = computeVWAP(adj.closes, adj.highs, adj.lows, volumes);
   const bollingerInfo = computeBollingerBands(adj.closes);
   const weeklyTrendInfo = computeWeeklyTrend(adj.closes);
+  const monthlyTrendInfo = computeMonthlyTrend(adj.closes);
 
   // 「偏多/偏空」結論改為三重確認(均線排列+KD交叉+量能未萎縮),與每日報表PowerShell版本邏輯一致,
   // 理由:價漲量縮是常見假突破訊號,加入量能確認可過濾掉一部分雜訊。量能資料不足時退回雙重確認。
@@ -528,7 +562,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code, liveQuote
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
     conclusion, score, todayVolZhang, triggerAlert, tradingCost, rallySignal,
     swingHighBreakout, surgePullback, maEntanglement, trustFirstBuy,
-    vwapInfo, bollingerInfo, weeklyTrendInfo,
+    vwapInfo, bollingerInfo, weeklyTrendInfo, monthlyTrendInfo,
   };
 }
 
@@ -684,12 +718,75 @@ function getConsecutiveDays(code, field) {
   }
 }
 
+// 融資融券:融資=散戶動向替代指標,融券/券資比=放空力道與軋空風險參考,與每日報表同一份資料
 async function fetchMargin(code) {
   try {
     const res = await fetch(`${PROXY_BASE}/api/margin/${code}`);
     if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// 借券賣出餘額:跟融券是不同機制,同樣代表市場放空/避險力道
+async function fetchLending(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/lending/${code}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// 千張大戶:集保結算所TDCC開放資料,每週更新一次(非每日資料)
+async function fetchBigHolder(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/bigholder/${code}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
+}
+
+// 財務體質:ROE/ROA/負債比率/流動比率
+async function fetchBalanceSheet(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/balancesheet/${code}`);
+    if (!res.ok) return null;
     const data = await res.json();
-    return data.marginChange;
+    return data.balanceSheet;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 歷年股利分派(近5年)
+async function fetchDividendHistory(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/dividendhistory/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.history || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// 總經風險客觀指標:VIX恐慌指數+美國10年期公債殖利率,全域資料不分股票,快取10分鐘避免重複呼叫
+let _macroCache = null, _macroCacheTime = 0;
+async function fetchMacro() {
+  const now = Date.now();
+  if (_macroCache && (now - _macroCacheTime) < 10 * 60 * 1000) return _macroCache;
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/macro`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    _macroCache = data;
+    _macroCacheTime = now;
+    return data;
   } catch (e) {
     return null;
   }
@@ -1150,8 +1247,9 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginChange, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot] = await Promise.all([
+    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData] = await Promise.all([
       fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(),
+      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
@@ -1164,12 +1262,24 @@ function StockAnalyzer() {
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
 
     const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens, data.code, data.liveQuote);
+    // 相對強弱RS(需要大盤TWII同期收盤價當基準,月線趨勢已內建在analyze()裡)
+    const adjForExtra = getAdjustedSeries(data.closes, data.highs, data.lows, data.adjCloses, data.opens);
+    const relativeStrengthInfo = (benchmarkData && benchmarkData.closes) ? computeRelativeStrength(adjForExtra.closes, benchmarkData.closes, 20) : null;
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
     if (!chineseName) chineseName = data.name;
     const news = await fetchNews(cleaned, chineseName);
-    const fullResult = { ...data, name: chineseName, ...analysis, marginChange, dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo };
+    const fullResult = {
+      ...data, name: chineseName, ...analysis,
+      marginChange: marginData ? marginData.marginChange : null,
+      marginBalance: marginData ? marginData.marginBalance : null,
+      shortChange: marginData ? marginData.shortChange : null,
+      shortBalance: marginData ? marginData.shortBalance : null,
+      shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
+      dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
+      bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
+    };
     setResult(fullResult);
     setUpdatedAt(new Date());
     logSearch(cleaned, !isLoggedIn);
@@ -1201,6 +1311,10 @@ function StockAnalyzer() {
       contextParts.push(`毛利率${profitability.grossMargin}%、營益率${profitability.operatingMargin}%${epsText}`);
     }
     if (flow) contextParts.push(`三大法人今日:外資${flow.foreignNet >= 0 ? '買超' : '賣超'}、投信${flow.trustNet >= 0 ? '買超' : '賣超'}`);
+    if (fullResult.shortMarginRatio != null) contextParts.push(`券資比${fullResult.shortMarginRatio}%`);
+    if (fullResult.bigHolder && fullResult.bigHolder.pct != null) contextParts.push(`千張大戶持股比例${fullResult.bigHolder.pct}%`);
+    if (fullResult.balanceSheet && fullResult.balanceSheet.roe != null) contextParts.push(`ROE(單季未年化)${fullResult.balanceSheet.roe}%`);
+    if (fullResult.relativeStrengthInfo) contextParts.push(`相對強弱RS=${fullResult.relativeStrengthInfo.rs}(${fullResult.relativeStrengthInfo.label})`);
     if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
     if (news && news.length > 0) contextParts.push(`近期相關新聞標題:` + news.map(n => `[${n.date}]${n.title}(${n.source || ''})`).join('; '));
     const insightResult = await fetchInsight(contextParts.join('\n'));
@@ -1239,6 +1353,9 @@ function StockAnalyzer() {
     if (result.dealerStreak?.days > 1) streakParts.push(`自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}`);
     if (streakParts.length > 0) parts.push(`連續買賣天數:${streakParts.join('、')}`);
     if (result.marginChange != null) parts.push(`散戶融資:${result.marginChange >= 0 ? '增加' : '減少'}`);
+    if (result.shortMarginRatio != null) parts.push(`券資比${result.shortMarginRatio}%`);
+    if (result.bigHolder && result.bigHolder.pct != null) parts.push(`千張大戶持股比例${result.bigHolder.pct}%`);
+    if (result.balanceSheet && result.balanceSheet.roe != null) parts.push(`ROE${result.balanceSheet.roe}%`);
     if (result.disposition && result.disposition.period) parts.push(`⚠️注意:此股票目前為處置股,交易方式受限,處置期間${result.disposition.period}`);
     if (result.announcements && result.announcements.length > 0) {
       parts.push('近期重大訊息:' + result.announcements.slice(0, 3).map(a => `[${a.date}]${a.subject}${a.sentiment ? `(AI判讀:${a.sentiment})` : ''}`).join('; '));
@@ -1661,11 +1778,85 @@ function StockAnalyzer() {
           )}
 
           {result.marginChange != null && (
-            <InfoLine label="散戶">
+            <InfoLine label="散戶(融資)">
               {result.marginChange >= 0
                 ? <span style={{ color: COLORS.up }}>買超(融資增加) {Math.abs(Math.round(result.marginChange / 1000))} 張</span>
                 : <span style={{ color: COLORS.down }}>賣超(融資減少) {Math.abs(Math.round(result.marginChange / 1000))} 張</span>}
               <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※以融資餘額增減作為散戶動向替代指標,非官方直接統計</span>
+            </InfoLine>
+          )}
+
+          {result.shortChange != null && (
+            <InfoLine label="融券">
+              {result.shortChange >= 0
+                ? <span style={{ color: COLORS.down }}>(偏空) 增加 {Math.abs(Math.round(result.shortChange / 1000))} 張,空方力道增強</span>
+                : <span style={{ color: COLORS.up }}>(偏多) 減少 {Math.abs(Math.round(result.shortChange / 1000))} 張,回補/空單減少</span>}
+              {result.shortMarginRatio != null && (
+                <span style={{ fontSize: 11, color: COLORS.textMuted }}> 、券資比 {result.shortMarginRatio}%{result.shortMarginRatio >= 30 ? '(偏高,若股價轉強,放空者回補可能加速上漲,即市場俗稱的軋空)' : ''}</span>
+              )}
+            </InfoLine>
+          )}
+
+          {result.lending && result.lending.balance != null && (
+            <InfoLine label="借券賣出餘額">
+              {result.lending.change >= 0
+                ? <span style={{ color: COLORS.down }}>(偏空) {result.lending.balance} 張,較前日增加 {Math.abs(result.lending.change)} 張</span>
+                : <span style={{ color: COLORS.up }}>(偏多) {result.lending.balance} 張,較前日減少 {Math.abs(result.lending.change)} 張</span>}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※跟融券是不同機制,同樣代表市場放空/避險力道</span>
+            </InfoLine>
+          )}
+
+          {result.bigHolder && result.bigHolder.pct != null && (
+            <InfoLine label="千張大戶">
+              持股比例 {result.bigHolder.pct}%,人數 {result.bigHolder.holders} 人
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> (資料日期:{result.bigHolder.date},集保結算所每週更新一次,非每日資料)</span>
+            </InfoLine>
+          )}
+
+          {result.balanceSheet && (result.balanceSheet.roe != null || result.balanceSheet.debtRatio != null) && (
+            <InfoLine label="財務體質">
+              {[
+                result.balanceSheet.roe != null ? `ROE(單季未年化) ${result.balanceSheet.roe}%` : null,
+                result.balanceSheet.roa != null ? `ROA(單季未年化) ${result.balanceSheet.roa}%` : null,
+                result.balanceSheet.debtRatio != null ? `負債比率 ${result.balanceSheet.debtRatio}%` : null,
+                result.balanceSheet.currentRatio != null ? `流動比率 ${result.balanceSheet.currentRatio}%` : null,
+              ].filter(Boolean).join('、')}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※ROE/ROA為當季數字未年化,僅供同業比較參考</span>
+            </InfoLine>
+          )}
+
+          {result.dividendHistory && result.dividendHistory.length > 0 && (
+            <InfoLine label="歷年股利">
+              {result.dividendHistory.map(h => `${h.year}年:現金${h.cash}元${h.stock > 0 ? `+股票${h.stock}元` : ''}`).join('、')}
+            </InfoLine>
+          )}
+
+          {result.monthlyTrendInfo && (
+            <InfoLine label="月線趨勢">
+              <span style={{ color: result.monthlyTrendInfo.trend === '月線偏多' ? COLORS.up : result.monthlyTrendInfo.trend === '月線偏空' ? COLORS.down : COLORS.textSecondary }}>
+                {result.monthlyTrendInfo.trend}
+              </span>
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> (2個月均價{result.monthlyTrendInfo.shortMA} vs 4個月均價{result.monthlyTrendInfo.longMA})</span>
+            </InfoLine>
+          )}
+
+          {result.relativeStrengthInfo && (
+            <InfoLine label="相對強弱(近20日)">
+              個股{result.relativeStrengthInfo.stockReturn}% vs 大盤{result.relativeStrengthInfo.benchmarkReturn}%,RS=
+              <span style={{ color: result.relativeStrengthInfo.rs > 0 ? COLORS.up : result.relativeStrengthInfo.rs < 0 ? COLORS.down : COLORS.textSecondary }}>
+                {result.relativeStrengthInfo.rs > 0 ? '+' : ''}{result.relativeStrengthInfo.rs}個百分點
+              </span>
+              ({result.relativeStrengthInfo.label})
+            </InfoLine>
+          )}
+
+          {result.macro && (result.macro.vix || result.macro.tnx) && (
+            <InfoLine label="總經風險指標">
+              {[
+                result.macro.vix ? `VIX恐慌指數 ${result.macro.vix.last}(${result.macro.vix.chg >= 0 ? '▲' : '▼'}${Math.abs(result.macro.vix.chg)})` : null,
+                result.macro.tnx ? `美國10年期公債殖利率 ${result.macro.tnx.last}%` : null,
+              ].filter(Boolean).join('、')}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※全市場共用數據,非個股專屬</span>
             </InfoLine>
           )}
 
