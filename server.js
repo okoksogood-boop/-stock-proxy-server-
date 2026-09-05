@@ -55,13 +55,16 @@ app.get('/api/admin/logs', (req, res) => {
 // 用法: GET /api/stock/2330  (自動嘗試上市.TW / 上櫃.TWO)
 app.get('/api/stock/:code', async (req, res) => {
   const code = req.params.code.trim();
-  const suffixes = ['.TW', '.TWO'];
+  // 大盤加權指數為特殊代碼,直接用^TWII查詢,不加.TW/.TWO後綴(這兩個後綴只適用一般個股);
+  // 新增相對強弱RS指標時需要抓大盤同期收盤價當基準,所以這裡要能正確處理TWII
+  const suffixes = code.toUpperCase() === 'TWII' ? [''] : ['.TW', '.TWO'];
+  const symbolBase = code.toUpperCase() === 'TWII' ? '^TWII' : code;
   let bestPartial = null;
 
   for (const suf of suffixes) {
     try {
       const cacheBuster = Date.now();
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}${suf}?range=6mo&interval=1d&_=${cacheBuster}`;
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbolBase}${suf}?range=6mo&interval=1d&_=${cacheBuster}`;
       const response = await fetch(url, {
         headers: { 'User-Agent': 'Mozilla/5.0', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' },
       });
@@ -529,7 +532,8 @@ app.get('/api/institutional/:code', async (req, res) => {
   }
 });
 
-// ---------- 融資餘額增減(散戶動向替代指標,官方CSV為Big5編碼,此處代為解碼轉發) ----------
+// ---------- 融資融券餘額增減(融資=散戶動向替代指標,融券=放空力道,券資比=融券/融資;
+// 官方CSV為Big5編碼,此處代為解碼轉發;與每日報表用同一份官方資料MI_MARGN,欄位索引相同) ----------
 // 用法: GET /api/margin/2330
 app.get('/api/margin/:code', async (req, res) => {
   const code = req.params.code.trim();
@@ -552,12 +556,194 @@ app.get('/api/margin/:code', async (req, res) => {
       const prevBal = parseFloat((fields[5] || '0').replace(/,/g, ''));
       const todayBal = parseFloat((fields[6] || '0').replace(/,/g, ''));
       if (isNaN(prevBal) || isNaN(todayBal)) break;
-      return res.json({ code, marginChange: todayBal - prevBal });
+      const marginChange = todayBal - prevBal;
+      const marginBalance = todayBal;
+
+      // 融券欄位(第12、13欄,索引11、12):完整一列依序為代號,名稱,融資買進,融資賣出,融資現金償還,
+      // 融資前日餘額,融資今日餘額,融資限額,融券買進,融券賣出,融券現券償還,融券前日餘額,融券今日餘額,融券限額,資券互抵
+      let shortChange = null, shortBalance = null, shortMarginRatio = null;
+      if (fields.length >= 13) {
+        const shortPrev = parseFloat((fields[11] || '').replace(/,/g, ''));
+        const shortToday = parseFloat((fields[12] || '').replace(/,/g, ''));
+        if (!isNaN(shortPrev) && !isNaN(shortToday)) {
+          shortChange = shortToday - shortPrev;
+          shortBalance = shortToday;
+          if (marginBalance > 0) shortMarginRatio = +((shortBalance / marginBalance) * 100).toFixed(2);
+        }
+      }
+
+      return res.json({ code, marginChange, marginBalance, shortChange, shortBalance, shortMarginRatio });
     }
     return res.json({ code, marginChange: null });
   } catch (e) {
     return res.status(500).json({ error: '取得融資資料失敗' });
   }
+});
+
+// ---------- 借券賣出餘額(跟融券是不同機制,同樣代表市場放空/避險力道,官方每日公布;與每日報表同一份資料TWT93U)----------
+// 用法: GET /api/lending/2330
+app.get('/api/lending/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://www.twse.com.tw/exchangeReport/TWT93U?response=csv&date=&selectType=ALL';
+    const response = await fetch(url);
+    const buffer = await response.arrayBuffer();
+    const csvText = iconv.decode(Buffer.from(buffer), 'big5');
+
+    const lines = csvText.split(/\r?\n/);
+    let inTable = false;
+    for (const line of lines) {
+      if (line.includes('"代號","名稱"') || line.includes('"股票代號"')) { inTable = true; continue; }
+      if (!inTable) continue;
+      if (line.trim() === '') break;
+      const fields = [...line.matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+      if (fields.length < 13) continue;
+      const rowCode = (fields[0] || '').trim();
+      if (rowCode !== code) continue;
+      // 完整一列依序:代號,名稱,前日融券餘額,本日融券賣出,本日融券買進,本日現券償還,本日融券餘額,本日融券限額,
+      // 前日借券賣出餘額,本日市場借券賣出,本日還券,本日調整,本日借券賣出餘額(索引12)
+      const priorBal = parseFloat((fields[8] || '').replace(/,/g, ''));
+      const todayBal = parseFloat((fields[12] || '').replace(/,/g, ''));
+      if (isNaN(priorBal) || isNaN(todayBal)) break;
+      return res.json({ code, balance: todayBal, change: todayBal - priorBal });
+    }
+    return res.json({ code, balance: null, change: null });
+  } catch (e) {
+    return res.json({ code, balance: null, change: null });
+  }
+});
+
+// ---------- 千張大戶(集保戶股權分散表,台灣集中保管結算所TDCC開放資料,每週更新一次,免費;
+// 持股分級第15級=持股1,000張(1,000,000股)以上;與每日報表同一份資料來源) ----------
+// 用法: GET /api/bigholder/2330
+app.get('/api/bigholder/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://opendata.tdcc.com.tw/getOD.ashx?id=1-5';
+    const response = await fetch(url);
+    const csvText = await response.text();
+    const lines = csvText.split(/\r?\n/).filter((l) => l.trim() !== '');
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',');
+      if (cols.length < 6) continue;
+      if ((cols[2] || '').trim() !== '15') continue; // 第15級=千張大戶
+      if ((cols[1] || '').trim() !== code) continue;
+      return res.json({
+        code,
+        date: (cols[0] || '').trim(),
+        holders: parseInt((cols[3] || '0').trim(), 10),
+        pct: parseFloat((cols[5] || '0').trim()),
+      });
+    }
+    return res.json({ code, date: null, holders: null, pct: null });
+  } catch (e) {
+    return res.json({ code, date: null, holders: null, pct: null });
+  }
+});
+
+// ---------- 財務體質:ROE/ROA/負債比率/流動比率(資產負債表t187ap07_L_ci,結合綜合損益表t187ap06_L_ci
+// 的淨利計算;ROE/ROA為當季數字未年化,僅供同業比較參考,與每日報表算法相同) ----------
+// 用法: GET /api/balancesheet/2330
+app.get('/api/balancesheet/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const getField = (obj, pattern) => {
+      const key = Object.keys(obj).find((k) => k.replace(/\s+/g, '').includes(pattern));
+      return key ? obj[key] : null;
+    };
+
+    const [bsRes, isRes] = await Promise.all([
+      fetch('https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci'),
+      fetch('https://openapi.twse.com.tw/v1/opendata/t187ap06_L_ci'),
+    ]);
+    const [bsJson, isJson] = await Promise.all([bsRes.json(), isRes.json()]);
+
+    const bsRow = bsJson.find((r) => getField(r, '公司代號') === code);
+    if (!bsRow) return res.json({ code, balanceSheet: null });
+
+    const numOrNull = (v) => (v && /^-?[\d.]+$/.test(v) ? parseFloat(v) : null);
+    const totalAssets = numOrNull(getField(bsRow, '資產總額') || getField(bsRow, '資產總計'));
+    const totalLiab = numOrNull(getField(bsRow, '負債總額') || getField(bsRow, '負債總計'));
+    const currentAssets = numOrNull(getField(bsRow, '流動資產'));
+    const currentLiab = numOrNull(getField(bsRow, '流動負債'));
+    const totalEquity = numOrNull(getField(bsRow, '權益總額') || getField(bsRow, '權益總計'));
+
+    const debtRatio = totalAssets && totalAssets > 0 && totalLiab != null ? +((totalLiab / totalAssets) * 100).toFixed(1) : null;
+    const currentRatio = currentLiab && currentLiab > 0 && currentAssets != null ? +((currentAssets / currentLiab) * 100).toFixed(1) : null;
+
+    let roe = null, roa = null;
+    const isRow = isJson.find((r) => getField(r, '公司代號') === code);
+    if (isRow) {
+      const netIncome = numOrNull(getField(isRow, '本期淨利') || getField(isRow, '淨利（淨損）'));
+      if (netIncome != null) {
+        if (totalEquity && totalEquity > 0) roe = +((netIncome / totalEquity) * 100).toFixed(2);
+        if (totalAssets && totalAssets > 0) roa = +((netIncome / totalAssets) * 100).toFixed(2);
+      }
+    }
+
+    return res.json({ code, balanceSheet: { totalAssets, totalEquity, debtRatio, currentRatio, roe, roa } });
+  } catch (e) {
+    return res.json({ code, balanceSheet: null });
+  }
+});
+
+// ---------- 歷年股利分派(上市公司股利分派情形t187ap45_L,近5年現金/股票股利,與每日報表同一份資料) ----------
+// 用法: GET /api/dividendhistory/2330
+app.get('/api/dividendhistory/:code', async (req, res) => {
+  const code = req.params.code.trim();
+  try {
+    const url = 'https://openapi.twse.com.tw/v1/opendata/t187ap45_L';
+    const response = await fetch(url);
+    const json = await response.json();
+
+    const getField = (obj, pattern) => {
+      const key = Object.keys(obj).find((k) => k.replace(/\s+/g, '').includes(pattern));
+      return key ? obj[key] : null;
+    };
+    const numOrZero = (v) => (v && /^-?[\d.]+$/.test(v) ? parseFloat(v) : 0);
+
+    const rows = json.filter((r) => getField(r, '公司代號') === code);
+    if (rows.length === 0) return res.json({ code, history: [] });
+
+    const history = rows
+      .map((r) => ({
+        year: getField(r, '股利所屬年度') || getField(r, '年度'),
+        cash: numOrZero(getField(r, '現金股利')),
+        stock: numOrZero(getField(r, '股票股利')),
+      }))
+      .filter((h) => h.year)
+      .sort((a, b) => String(b.year).localeCompare(String(a.year)))
+      .slice(0, 5);
+
+    return res.json({ code, history });
+  } catch (e) {
+    return res.json({ code, history: [] });
+  }
+});
+
+// ---------- 總經風險客觀指標:VIX恐慌指數+美國10年期公債殖利率(Yahoo Finance,與每日報表同一套資料,
+// 全域資料不分股票代號,前端可快取,不需每次查股票都重新呼叫) ----------
+// 用法: GET /api/macro
+app.get('/api/macro', async (req, res) => {
+  const fetchYahoo = async (symbol) => {
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
+      const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      if (!response.ok) return null;
+      const json = await response.json();
+      const result = json?.chart?.result?.[0];
+      const closes = result?.indicators?.quote?.[0]?.close?.filter((v) => v != null);
+      if (!closes || closes.length < 2) return null;
+      const last = closes[closes.length - 1];
+      const prev = closes[closes.length - 2];
+      return { last: +last.toFixed(2), chg: +(last - prev).toFixed(2), chgPct: +(((last - prev) / prev) * 100).toFixed(2) };
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const [vix, tnx] = await Promise.all([fetchYahoo('^VIX'), fetchYahoo('^TNX')]);
+  return res.json({ vix, tnx });
 });
 
 // ---------- 盤中分鐘級走勢資料(供繪製今日09:00-13:30走勢圖) ----------
