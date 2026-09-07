@@ -420,6 +420,82 @@ function computeMonthlyTrend(closes, shortPeriod = 2, longPeriod = 4) {
   return { shortMA: +shortMA.toFixed(2), longMA: +longMA.toFixed(2), trend };
 }
 
+// 支撐/壓力關卡:找出歷史局部高點/低點(樞紐點),把距離相近的樞紐點合併成同一個「關卡」,
+// 觸碰次數越多代表這個價位越多次被反轉,是比較強的關卡。只回傳現價最近的一組支撐(下方)跟
+// 壓力(上方)。與每日報表PowerShell版本Get-SupportResistanceLevels邏輯一致
+function computePriceClusters(points, tolerancePct = 2.0) {
+  if (!points || points.length === 0) return [];
+  const sorted = [...points].sort((a, b) => a - b);
+  const clusters = [];
+  let current = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    const avgSoFar = current.reduce((a, b) => a + b, 0) / current.length;
+    if (avgSoFar !== 0 && Math.abs(sorted[i] - avgSoFar) / avgSoFar * 100 <= tolerancePct) {
+      current.push(sorted[i]);
+    } else {
+      clusters.push({ price: +(current.reduce((a, b) => a + b, 0) / current.length).toFixed(2), touches: current.length });
+      current = [sorted[i]];
+    }
+  }
+  clusters.push({ price: +(current.reduce((a, b) => a + b, 0) / current.length).toFixed(2), touches: current.length });
+  return clusters;
+}
+function computeSupportResistance(highs, lows, lastPrice, pivotWindow = 5) {
+  const n = highs.length;
+  if (n < pivotWindow * 2 + 20 || lows.length !== n) return null;
+  const pivotHighs = [], pivotLows = [];
+  for (let i = pivotWindow; i < n - pivotWindow; i++) {
+    const windowHighs = highs.slice(i - pivotWindow, i + pivotWindow + 1);
+    const windowLows = lows.slice(i - pivotWindow, i + pivotWindow + 1);
+    if (highs[i] === Math.max(...windowHighs)) pivotHighs.push(highs[i]);
+    if (lows[i] === Math.min(...windowLows)) pivotLows.push(lows[i]);
+  }
+  const resistanceClusters = computePriceClusters(pivotHighs).filter(c => c.price > lastPrice).sort((a, b) => a.price - b.price);
+  const supportClusters = computePriceClusters(pivotLows).filter(c => c.price < lastPrice).sort((a, b) => b.price - a.price);
+  const nearestResistance = resistanceClusters.find(c => c.touches >= 2) || resistanceClusters[0] || null;
+  const nearestSupport = supportClusters.find(c => c.touches >= 2) || supportClusters[0] || null;
+  return { resistance: nearestResistance, support: nearestSupport };
+}
+
+// 成交量密集區(近似值,非精確Volume Profile):Yahoo Finance只有每日OHLCV,沒有分鐘K或逐筆
+// 成交資料,無法算出真正逐筆的量價分布。用「把每天的成交量依當天收盤價歸類進價格區間累加」
+// 的簡化做法做近似估計,與每日報表PowerShell版本Get-VolumeConcentrationZone邏輯一致
+function computeVolumeConcentration(closes, volumes, lastPrice, binCount = 15) {
+  const n = closes.length;
+  if (n < 30 || volumes.length !== n) return null;
+  const minPrice = Math.min(...closes);
+  const maxPrice = Math.max(...closes);
+  if (maxPrice === minPrice) return null;
+  const binSize = (maxPrice - minPrice) / binCount;
+  const binVolumes = new Array(binCount).fill(0);
+  for (let i = 0; i < n; i++) {
+    const binIndex = Math.min(binCount - 1, Math.floor((closes[i] - minPrice) / binSize));
+    binVolumes[binIndex] += volumes[i];
+  }
+  const totalVolume = binVolumes.reduce((a, b) => a + b, 0);
+  if (totalVolume === 0) return null;
+  let maxBinIndex = 0;
+  for (let i = 1; i < binCount; i++) { if (binVolumes[i] > binVolumes[maxBinIndex]) maxBinIndex = i; }
+  const zoneLow = +(minPrice + maxBinIndex * binSize).toFixed(2);
+  const zoneHigh = +(minPrice + (maxBinIndex + 1) * binSize).toFixed(2);
+  const pct = +((binVolumes[maxBinIndex] / totalVolume) * 100).toFixed(1);
+  const position = (lastPrice >= zoneLow && lastPrice <= zoneHigh) ? '現價正處於此密集區內' : (lastPrice > zoneHigh ? '現價已高於此密集區' : '現價尚低於此密集區');
+  return { zoneLow, zoneHigh, pct, position };
+}
+
+// 近期新高/新低提示:嚴格來說做不到真正的「歷史新高」,Yahoo Finance只抓了近6個月的資料,
+// 不是從上市以來的完整歷史股價,所以這裡只能做到「抓取範圍內新高/新低」,與每日報表PowerShell
+// 版本邏輯一致,文字上要講清楚範圍,不能誤導成真正的歷史新高
+function computePriceMilestone(closes) {
+  if (!closes || closes.length < 20) return null;
+  const windowHigh = Math.max(...closes);
+  const windowLow = Math.min(...closes);
+  const last = closes[closes.length - 1];
+  if (last >= windowHigh) return { type: 'high', count: closes.length };
+  if (last <= windowLow) return { type: 'low', count: closes.length };
+  return null;
+}
+
 // 相對強弱RS:個股近N日報酬率減去大盤加權指數(TWII)同期報酬率,正值代表比大盤強,與每日報表Get-RelativeStrength邏輯一致
 function computeRelativeStrength(closes, benchmarkCloses, days = 20) {
   if (closes.length < days + 1 || !benchmarkCloses || benchmarkCloses.length < days + 1) return null;
@@ -1265,6 +1341,12 @@ function StockAnalyzer() {
     // 相對強弱RS(需要大盤TWII同期收盤價當基準,月線趨勢已內建在analyze()裡)
     const adjForExtra = getAdjustedSeries(data.closes, data.highs, data.lows, data.adjCloses, data.opens);
     const relativeStrengthInfo = (benchmarkData && benchmarkData.closes) ? computeRelativeStrength(adjForExtra.closes, benchmarkData.closes, 20) : null;
+    // 支撐/壓力關卡、成交量密集區、近半年新高/新低:皆為純價量計算,不需要額外API,
+    // 與每日報表PowerShell版本邏輯一致(詳見上方函式註解)
+    const lastPriceForExtra = adjForExtra.closes[adjForExtra.closes.length - 1];
+    const supportResistanceInfo = computeSupportResistance(adjForExtra.highs, adjForExtra.lows, lastPriceForExtra);
+    const volumeConcentrationInfo = computeVolumeConcentration(adjForExtra.closes, data.volumes, lastPriceForExtra);
+    const priceMilestoneInfo = computePriceMilestone(adjForExtra.closes);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
     let chineseName = nameMapRef.current && nameMapRef.current[data.code];
     if (!chineseName) chineseName = await fetchOtcName(cleaned);
@@ -1279,6 +1361,7 @@ function StockAnalyzer() {
       shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
       dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
+      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo,
     };
     setResult(fullResult);
     setUpdatedAt(new Date());
@@ -1315,6 +1398,10 @@ function StockAnalyzer() {
     if (fullResult.bigHolder && fullResult.bigHolder.pct != null) contextParts.push(`千張大戶持股比例${fullResult.bigHolder.pct}%`);
     if (fullResult.balanceSheet && fullResult.balanceSheet.roe != null) contextParts.push(`ROE(單季未年化)${fullResult.balanceSheet.roe}%`);
     if (fullResult.relativeStrengthInfo) contextParts.push(`相對強弱RS=${fullResult.relativeStrengthInfo.rs}(${fullResult.relativeStrengthInfo.label})`);
+    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.resistance) contextParts.push(`近期壓力關卡:${fullResult.supportResistanceInfo.resistance.price}元(歷史反轉${fullResult.supportResistanceInfo.resistance.touches}次)`);
+    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.support) contextParts.push(`近期支撐關卡:${fullResult.supportResistanceInfo.support.price}元(歷史反轉${fullResult.supportResistanceInfo.support.touches}次)`);
+    if (fullResult.volumeConcentrationInfo) contextParts.push(`成交量密集區:${fullResult.volumeConcentrationInfo.zoneLow}~${fullResult.volumeConcentrationInfo.zoneHigh}元,${fullResult.volumeConcentrationInfo.position}`);
+    if (fullResult.priceMilestoneInfo) contextParts.push(`價格里程碑:創近半年${fullResult.priceMilestoneInfo.type === 'high' ? '新高' : '新低'}`);
     if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
     if (news && news.length > 0) contextParts.push(`近期相關新聞標題:` + news.map(n => `[${n.date}]${n.title}(${n.source || ''})`).join('; '));
     const insightResult = await fetchInsight(contextParts.join('\n'));
@@ -1356,6 +1443,11 @@ function StockAnalyzer() {
     if (result.shortMarginRatio != null) parts.push(`券資比${result.shortMarginRatio}%`);
     if (result.bigHolder && result.bigHolder.pct != null) parts.push(`千張大戶持股比例${result.bigHolder.pct}%`);
     if (result.balanceSheet && result.balanceSheet.roe != null) parts.push(`ROE${result.balanceSheet.roe}%`);
+    if (result.relativeStrengthInfo) parts.push(`相對強弱RS=${result.relativeStrengthInfo.rs}(${result.relativeStrengthInfo.label})`);
+    if (result.supportResistanceInfo && result.supportResistanceInfo.resistance) parts.push(`近期壓力關卡:${result.supportResistanceInfo.resistance.price}元`);
+    if (result.supportResistanceInfo && result.supportResistanceInfo.support) parts.push(`近期支撐關卡:${result.supportResistanceInfo.support.price}元`);
+    if (result.volumeConcentrationInfo) parts.push(`成交量密集區:${result.volumeConcentrationInfo.zoneLow}~${result.volumeConcentrationInfo.zoneHigh}元`);
+    if (result.priceMilestoneInfo) parts.push(`價格里程碑:創近半年${result.priceMilestoneInfo.type === 'high' ? '新高' : '新低'}`);
     if (result.disposition && result.disposition.period) parts.push(`⚠️注意:此股票目前為處置股,交易方式受限,處置期間${result.disposition.period}`);
     if (result.announcements && result.announcements.length > 0) {
       parts.push('近期重大訊息:' + result.announcements.slice(0, 3).map(a => `[${a.date}]${a.subject}${a.sentiment ? `(AI判讀:${a.sentiment})` : ''}`).join('; '));
@@ -1847,6 +1939,38 @@ function StockAnalyzer() {
                 {result.relativeStrengthInfo.rs > 0 ? '+' : ''}{result.relativeStrengthInfo.rs}個百分點
               </span>
               ({result.relativeStrengthInfo.label})
+            </InfoLine>
+          )}
+
+          {result.priceMilestoneInfo && (
+            <InfoLine label="價格里程碑">
+              <span style={{ color: result.priceMilestoneInfo.type === 'high' ? COLORS.up : COLORS.down, fontWeight: 600 }}>
+                {result.priceMilestoneInfo.type === 'high' ? '🔥' : '🧊'} 近{result.priceMilestoneInfo.count}個交易日(約半年){result.priceMilestoneInfo.type === 'high' ? '新高' : '新低'}
+              </span>
+            </InfoLine>
+          )}
+
+          {result.supportResistanceInfo && (result.supportResistanceInfo.resistance || result.supportResistanceInfo.support) && (
+            <>
+              {result.supportResistanceInfo.resistance && (
+                <InfoLine label="近期壓力">
+                  <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.resistance.price} 元</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價+{(((result.supportResistanceInfo.resistance.price - result.last) / result.last) * 100).toFixed(1)}%,歷史反轉{result.supportResistanceInfo.resistance.touches}次)</span>
+                </InfoLine>
+              )}
+              {result.supportResistanceInfo.support && (
+                <InfoLine label="近期支撐">
+                  <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.support.price} 元</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價-{(((result.last - result.supportResistanceInfo.support.price) / result.last) * 100).toFixed(1)}%,歷史反轉{result.supportResistanceInfo.support.touches}次)</span>
+                </InfoLine>
+              )}
+            </>
+          )}
+
+          {result.volumeConcentrationInfo && (
+            <InfoLine label="成交量密集區">
+              <span style={{ color: COLORS.yellow }}>{result.volumeConcentrationInfo.zoneLow}~{result.volumeConcentrationInfo.zoneHigh} 元</span>
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> (近半年成交量佔比約{result.volumeConcentrationInfo.pct}%,{result.volumeConcentrationInfo.position})[⚠️近似值,非精確逐筆量價分布]</span>
             </InfoLine>
           )}
 
