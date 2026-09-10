@@ -1963,18 +1963,28 @@ function StockAnalyzer() {
 
           {result.supportResistanceInfo && (result.supportResistanceInfo.resistance || result.supportResistanceInfo.support) && (
             <>
-              {result.supportResistanceInfo.resistance && (
+              {result.supportResistanceInfo.resistance && (() => {
+                const resDist = +(((result.supportResistanceInfo.resistance.price - result.last) / result.last) * 100).toFixed(1);
+                const resUnreasonable = Math.abs(resDist) > 30;
+                return (
                 <InfoLine label="近期壓力">
                   <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.resistance.price} 元</span>
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價+{(((result.supportResistanceInfo.resistance.price - result.last) / result.last) * 100).toFixed(1)}%,歷史反轉{result.supportResistanceInfo.resistance.touches}次)</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價+{resDist}%,歷史反轉{result.supportResistanceInfo.resistance.touches}次)</span>
+                  {resUnreasonable && <span style={{ fontSize: 11, color: COLORS.orange }}> ⚠️距現價落差偏大,請人工核對</span>}
                 </InfoLine>
-              )}
-              {result.supportResistanceInfo.support && (
+                );
+              })()}
+              {result.supportResistanceInfo.support && (() => {
+                const supDist = +(((result.last - result.supportResistanceInfo.support.price) / result.last) * 100).toFixed(1);
+                const supUnreasonable = Math.abs(supDist) > 30;
+                return (
                 <InfoLine label="近期支撐">
                   <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.support.price} 元</span>
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價-{(((result.last - result.supportResistanceInfo.support.price) / result.last) * 100).toFixed(1)}%,歷史反轉{result.supportResistanceInfo.support.touches}次)</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價-{supDist}%,歷史反轉{result.supportResistanceInfo.support.touches}次)</span>
+                  {supUnreasonable && <span style={{ fontSize: 11, color: COLORS.orange }}> ⚠️距現價落差偏大,請人工核對</span>}
                 </InfoLine>
-              )}
+                );
+              })()}
             </>
           )}
 
