@@ -237,6 +237,14 @@ function computeBias(lastPrice, ma20) {
   return { bias, warning };
 }
 
+// 統一的「可追/不可/未知」狀態標示,依乖離率>15%或RSI>80判斷,與每日報表
+// Get-ChaseStatusLabel邏輯一致,確保網頁版跟報表版看到的結論相同
+function computeChaseStatus(bias, rsi) {
+  if (bias == null && rsi == null) return '未知';
+  if ((bias != null && bias > 15) || (rsi != null && rsi > 80)) return '不可';
+  return '可追';
+}
+
 // 連續上漲/下跌天數:同時回報兩種方向的天數,不再只單向描述漲勢,與每日報表Get-RecentUpDays邏輯一致
 function computeUpDays(closes, lookback = 5) {
   if (closes.length < lookback + 1) return null;
@@ -1784,6 +1792,9 @@ function StockAnalyzer() {
             <StatBox label="乖離率(BIAS)" value={result.biasInfo ? `${result.biasInfo.bias}%` : '—'}
               sub={result.biasInfo ? result.biasInfo.warning : ''}
               color={result.biasInfo ? (result.biasInfo.bias > 8 ? COLORS.orange : (result.biasInfo.bias >= 0 ? COLORS.up : COLORS.down)) : undefined} />
+            <StatBox label="可追狀態" value={computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi)}
+              sub="依乖離率/RSI判斷,非投資建議"
+              color={(() => { const s = computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi); return s === '可追' ? COLORS.up : s === '不可' ? COLORS.down : COLORS.textSecondary; })()} />
             <StatBox label="量比" value={result.volRatio ?? '—'}
               sub={result.volRatio >= 2 ? '成交量明顯放大' : (result.volTrend || '')}
               color={result.volRatio >= 2 ? COLORS.gold : undefined} />
