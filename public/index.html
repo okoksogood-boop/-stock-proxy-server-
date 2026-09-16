@@ -245,6 +245,37 @@ function computeChaseStatus(bias, rsi) {
   return '可追';
 }
 
+// 短中期訊號綜合判讀:把可追狀態(短線)、月線趨勢+相對強弱(中期)整合成一句話,
+// 與每日報表Get-ShortMidSyncLine邏輯一致,7種組合用符號+文字快速分辨嚴重程度
+function computeShortMidSyncLine(chaseStatus, monthlyTrend, rsLabel) {
+  let midScore = 0;
+  if (monthlyTrend === '月線偏多') midScore++;
+  else if (monthlyTrend === '月線偏空') midScore--;
+  if (rsLabel === '強於大盤') midScore++;
+  else if (rsLabel === '弱於大盤') midScore--;
+  const midLabel = midScore >= 1 ? '中期偏多' : midScore <= -1 ? '中期偏空' : '中期中性';
+
+  if (chaseStatus === '未知') {
+    return `短線資料不足無法判斷,僅供參考中期方向:${midLabel}`;
+  }
+  if (chaseStatus === '可追' && midLabel === '中期偏多') {
+    return '✅短中期同步偏多,短線正常、中期動能也支持,訊號方向一致';
+  }
+  if (chaseStatus === '可追' && midLabel === '中期偏空') {
+    return `⚠️短線雖正常,但中期動能(${monthlyTrend || '—'}/${rsLabel || '—'})已轉弱,留意是否僅為短暫反彈,非真正的趨勢向上`;
+  }
+  if (chaseStatus === '可追') {
+    return `短線正常,中期方向中性不明確(${monthlyTrend || '—'}/${rsLabel || '—'}),僅供參考`;
+  }
+  if (chaseStatus === '不建議' && midLabel === '中期偏多') {
+    return `⚠️短線過熱,但中期趨勢仍偏多(${monthlyTrend || '—'}/${rsLabel || '—'})——這種組合通常代表健康的噴出段而非轉弱訊號,風險相對可控,但仍非投資建議,追價與否請自行評估`;
+  }
+  if (chaseStatus === '不建議' && midLabel === '中期偏空') {
+    return `⚠️⚠️短中期同步轉弱,短線過熱且中期動能(${monthlyTrend || '—'}/${rsLabel || '—'})也偏弱,風險層層疊加,建議提高警覺`;
+  }
+  return `短線過熱,中期方向中性不明確(${monthlyTrend || '—'}/${rsLabel || '—'}),建議觀望`;
+}
+
 // 連續上漲/下跌天數:同時回報兩種方向的天數,不再只單向描述漲勢,與每日報表Get-RecentUpDays邏輯一致
 function computeUpDays(closes, lookback = 5) {
   if (closes.length < lookback + 1) return null;
@@ -1952,6 +1983,17 @@ function StockAnalyzer() {
               ({result.relativeStrengthInfo.label})
             </InfoLine>
           )}
+
+          {(result.monthlyTrendInfo || result.relativeStrengthInfo) && (() => {
+            const cs = computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi);
+            const syncLine = computeShortMidSyncLine(cs, result.monthlyTrendInfo ? result.monthlyTrendInfo.trend : null, result.relativeStrengthInfo ? result.relativeStrengthInfo.label : null);
+            const syncColor = syncLine.startsWith('✅') ? COLORS.down : syncLine.startsWith('⚠️⚠️') ? COLORS.up : COLORS.yellow;
+            return (
+              <InfoLine label="短中期訊號綜合判讀">
+                <span style={{ color: syncColor }}>{syncLine}</span>
+              </InfoLine>
+            );
+          })()}
 
           {result.priceMilestoneInfo && (
             <InfoLine label="價格里程碑">
