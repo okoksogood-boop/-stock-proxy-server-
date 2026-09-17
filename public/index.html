@@ -1766,6 +1766,12 @@ function StockAnalyzer() {
               現在是台股交易時段內,以上為即時跳動報價,收盤後數字才會定案
             </div>
           )}
+          {result.priceDiscrepancy && (
+            <div style={{ fontSize: 12, color: COLORS.orange, background: 'rgba(255,171,92,0.1)', border: `1px solid ${COLORS.orange}`, borderRadius: 4, padding: '6px 10px', marginTop: 6 }}>
+              ⚠️資料來源價格落差提醒:Yahoo現價{result.priceDiscrepancy.yahooPrice},證交所官方報價{result.priceDiscrepancy.twsePrice},
+              落差{result.priceDiscrepancy.gapPct}%,可能其中一方資料延遲或異常,漲跌方向與百分比可能不準確,建議交叉確認
+            </div>
+          )}
 
           <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
             volumes={result.volumes} timestamps={result.timestamps} name={result.name} code={result.code} />
