@@ -2112,6 +2112,22 @@ function StockAnalyzer() {
                   const warning = checkAISignalConsistency(aiInsight.sentiment, result.conclusion);
                   return warning ? <div style={{ marginTop: 6, fontSize: 12, color: COLORS.orange, fontWeight: 700 }}>{warning}</div> : null;
                 })()}
+                {aiInsight.cautious != null && aiInsight.neutral != null && aiInsight.optimistic != null && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 11, color: COLORS.textSecondary, whiteSpace: 'nowrap' }}>謹慎{aiInsight.cautious}%</span>
+                      <div style={{ display: 'flex', height: 12, flex: 1, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
+                        <div style={{ width: `${aiInsight.cautious}%`, background: '#7f8fa6' }} title={`謹慎${aiInsight.cautious}%`}></div>
+                        <div style={{ width: `${aiInsight.neutral}%`, background: '#576574' }} title={`中立${aiInsight.neutral}%`}></div>
+                        <div style={{ width: `${aiInsight.optimistic}%`, background: '#c0392b' }} title={`樂觀${aiInsight.optimistic}%`}></div>
+                      </div>
+                      <span style={{ fontSize: 11, color: COLORS.up, whiteSpace: 'nowrap' }}>樂觀{aiInsight.optimistic}%</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: COLORS.textMuted, marginTop: 4 }}>
+                      AI市場輿情 ※依價量技術面+近期新聞標題綜合評估,新聞樣本量有限,非大規模輿情資料庫統計,僅供參考
+                    </div>
+                  </div>
+                )}
               </>
             )}
             {!aiInsight && !insightLoading && (
