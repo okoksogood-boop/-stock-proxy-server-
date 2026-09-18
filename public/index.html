@@ -2121,11 +2121,11 @@ function StockAnalyzer() {
                 {aiInsight.cautious != null && aiInsight.neutral != null && aiInsight.optimistic != null && (
                   <div style={{ marginTop: 10 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ fontSize: 11, color: COLORS.textSecondary, whiteSpace: 'nowrap' }}>謹慎{aiInsight.cautious}%</span>
+                      <span style={{ fontSize: 11, color: COLORS.down, whiteSpace: 'nowrap' }}>謹慎{aiInsight.cautious}%</span>
                       <div style={{ display: 'flex', height: 12, flex: 1, borderRadius: 3, overflow: 'hidden', background: COLORS.border }}>
-                        <div style={{ width: `${aiInsight.cautious}%`, background: '#7f8fa6' }} title={`謹慎${aiInsight.cautious}%`}></div>
+                        <div style={{ width: `${aiInsight.cautious}%`, background: COLORS.down }} title={`謹慎${aiInsight.cautious}%`}></div>
                         <div style={{ width: `${aiInsight.neutral}%`, background: '#576574' }} title={`中立${aiInsight.neutral}%`}></div>
-                        <div style={{ width: `${aiInsight.optimistic}%`, background: '#c0392b' }} title={`樂觀${aiInsight.optimistic}%`}></div>
+                        <div style={{ width: `${aiInsight.optimistic}%`, background: COLORS.up }} title={`樂觀${aiInsight.optimistic}%`}></div>
                       </div>
                       <span style={{ fontSize: 11, color: COLORS.up, whiteSpace: 'nowrap' }}>樂觀{aiInsight.optimistic}%</span>
                     </div>
