@@ -479,7 +479,7 @@ function computePriceClusters(points, tolerancePct = 2.0) {
   clusters.push({ price: +(current.reduce((a, b) => a + b, 0) / current.length).toFixed(2), touches: current.length });
   return clusters;
 }
-function computeSupportResistance(highs, lows, lastPrice, pivotWindow = 5) {
+function computeSupportResistance(highs, lows, lastPrice, closes = null, pivotWindow = 5) {
   const n = highs.length;
   if (n < pivotWindow * 2 + 20 || lows.length !== n) return null;
   const pivotHighs = [], pivotLows = [];
@@ -491,8 +491,24 @@ function computeSupportResistance(highs, lows, lastPrice, pivotWindow = 5) {
   }
   const resistanceClusters = computePriceClusters(pivotHighs).filter(c => c.price > lastPrice).sort((a, b) => a.price - b.price);
   const supportClusters = computePriceClusters(pivotLows).filter(c => c.price < lastPrice).sort((a, b) => b.price - a.price);
-  const nearestResistance = resistanceClusters.find(c => c.touches >= 2) || resistanceClusters[0] || null;
-  const nearestSupport = supportClusters.find(c => c.touches >= 2) || supportClusters[0] || null;
+  let nearestResistance = resistanceClusters.find(c => c.touches >= 2) || resistanceClusters[0] || null;
+  let nearestSupport = supportClusters.find(c => c.touches >= 2) || supportClusters[0] || null;
+
+  // ATR合成關卡退路:近半年樞紐點如果剛好都離現價很遠,或根本沒有樞紐點,改用「現價±2倍ATR」
+  // 算一個貼近現價的合成關卡,並標記isSynthetic,跟每日報表PowerShell版本的Get-SupportResistanceLevels邏輯一致
+  if (closes && closes.length >= 15) {
+    const atr = computeATR(closes, highs, lows, 14);
+    if (atr && atr > 0) {
+      const resistanceDistPct = nearestResistance ? ((nearestResistance.price - lastPrice) / lastPrice) * 100 : null;
+      if (!nearestResistance || resistanceDistPct > 20) {
+        nearestResistance = { price: +(lastPrice + 2 * atr).toFixed(2), touches: 0, isSynthetic: true };
+      }
+      const supportDistPct = nearestSupport ? ((lastPrice - nearestSupport.price) / lastPrice) * 100 : null;
+      if (!nearestSupport || supportDistPct > 20) {
+        nearestSupport = { price: +(lastPrice - 2 * atr).toFixed(2), touches: 0, isSynthetic: true };
+      }
+    }
+  }
   return { resistance: nearestResistance, support: nearestSupport };
 }
 
@@ -1383,7 +1399,7 @@ function StockAnalyzer() {
     // 支撐/壓力關卡、成交量密集區、近半年新高/新低:皆為純價量計算,不需要額外API,
     // 與每日報表PowerShell版本邏輯一致(詳見上方函式註解)
     const lastPriceForExtra = adjForExtra.closes[adjForExtra.closes.length - 1];
-    const supportResistanceInfo = computeSupportResistance(adjForExtra.highs, adjForExtra.lows, lastPriceForExtra);
+    const supportResistanceInfo = computeSupportResistance(adjForExtra.highs, adjForExtra.lows, lastPriceForExtra, adjForExtra.closes);
     const volumeConcentrationInfo = computeVolumeConcentration(adjForExtra.closes, data.volumes, lastPriceForExtra);
     const priceMilestoneInfo = computePriceMilestone(adjForExtra.closes);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
@@ -1437,8 +1453,8 @@ function StockAnalyzer() {
     if (fullResult.bigHolder && fullResult.bigHolder.pct != null) contextParts.push(`千張大戶持股比例${fullResult.bigHolder.pct}%`);
     if (fullResult.balanceSheet && fullResult.balanceSheet.roe != null) contextParts.push(`ROE(單季未年化)${fullResult.balanceSheet.roe}%`);
     if (fullResult.relativeStrengthInfo) contextParts.push(`相對強弱RS=${fullResult.relativeStrengthInfo.rs}(${fullResult.relativeStrengthInfo.label})`);
-    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.resistance) contextParts.push(`近期壓力關卡:${fullResult.supportResistanceInfo.resistance.price}元(歷史反轉${fullResult.supportResistanceInfo.resistance.touches}次)`);
-    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.support) contextParts.push(`近期支撐關卡:${fullResult.supportResistanceInfo.support.price}元(歷史反轉${fullResult.supportResistanceInfo.support.touches}次)`);
+    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.resistance) contextParts.push(`近期壓力關卡:${fullResult.supportResistanceInfo.resistance.price}元(${fullResult.supportResistanceInfo.resistance.isSynthetic ? 'ATR波動度概估,非樞紐關卡' : `歷史反轉${fullResult.supportResistanceInfo.resistance.touches}次`})`);
+    if (fullResult.supportResistanceInfo && fullResult.supportResistanceInfo.support) contextParts.push(`近期支撐關卡:${fullResult.supportResistanceInfo.support.price}元(${fullResult.supportResistanceInfo.support.isSynthetic ? 'ATR波動度概估,非樞紐關卡' : `歷史反轉${fullResult.supportResistanceInfo.support.touches}次`})`);
     if (fullResult.volumeConcentrationInfo) contextParts.push(`成交量密集區:${fullResult.volumeConcentrationInfo.zoneLow}~${fullResult.volumeConcentrationInfo.zoneHigh}元,${fullResult.volumeConcentrationInfo.position}`);
     if (fullResult.priceMilestoneInfo) contextParts.push(`價格里程碑:創近半年${fullResult.priceMilestoneInfo.type === 'high' ? '新高' : '新低'}`);
     if (announcements && announcements.length > 0) contextParts.push(`近期重大訊息:${announcements[0].subject}${announcements[0].sentiment ? `(AI判讀:${announcements[0].sentiment})` : ''}`);
@@ -2008,7 +2024,9 @@ function StockAnalyzer() {
           {(result.monthlyTrendInfo || result.relativeStrengthInfo) && (() => {
             const cs = computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi);
             const syncLine = computeShortMidSyncLine(cs, result.monthlyTrendInfo ? result.monthlyTrendInfo.trend : null, result.relativeStrengthInfo ? result.relativeStrengthInfo.label : null);
-            const syncColor = syncLine.startsWith('✅') ? COLORS.down : syncLine.startsWith('⚠️⚠️') ? COLORS.up : COLORS.yellow;
+            // 台股慣例紅漲綠跌:✅偏多用COLORS.up(紅)、⚠️⚠️偏空用COLORS.down(綠)。原本這裡兩個
+            // 顏色寫反了,跟每日報表PowerShell版本原本的同一個bug一樣(已經在PS版修正過),這裡同步修正
+            const syncColor = syncLine.startsWith('✅') ? COLORS.up : syncLine.startsWith('⚠️⚠️') ? COLORS.down : COLORS.yellow;
             return (
               <InfoLine label="短中期訊號綜合判讀">
                 <span style={{ color: syncColor }}>{syncLine}</span>
@@ -2029,10 +2047,11 @@ function StockAnalyzer() {
               {result.supportResistanceInfo.resistance && (() => {
                 const resDist = +(((result.supportResistanceInfo.resistance.price - result.last) / result.last) * 100).toFixed(1);
                 const resUnreasonable = Math.abs(resDist) > 30;
+                const resBasisText = result.supportResistanceInfo.resistance.isSynthetic ? '近半年無明顯樞紐關卡,以2倍ATR波動度概估' : `歷史反轉${result.supportResistanceInfo.resistance.touches}次`;
                 return (
                 <InfoLine label="近期壓力">
                   <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.resistance.price} 元</span>
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價+{resDist}%,歷史反轉{result.supportResistanceInfo.resistance.touches}次)</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價+{resDist}%,{resBasisText})</span>
                   {resUnreasonable && <span style={{ fontSize: 11, color: COLORS.orange }}> ⚠️距現價落差偏大,請人工核對</span>}
                 </InfoLine>
                 );
@@ -2040,10 +2059,11 @@ function StockAnalyzer() {
               {result.supportResistanceInfo.support && (() => {
                 const supDist = +(((result.last - result.supportResistanceInfo.support.price) / result.last) * 100).toFixed(1);
                 const supUnreasonable = Math.abs(supDist) > 30;
+                const supBasisText = result.supportResistanceInfo.support.isSynthetic ? '近半年無明顯樞紐關卡,以2倍ATR波動度概估' : `歷史反轉${result.supportResistanceInfo.support.touches}次`;
                 return (
                 <InfoLine label="近期支撐">
                   <span style={{ color: COLORS.blue }}>{result.supportResistanceInfo.support.price} 元</span>
-                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價-{supDist}%,歷史反轉{result.supportResistanceInfo.support.touches}次)</span>
+                  <span style={{ fontSize: 11, color: COLORS.textMuted }}> (距現價-{supDist}%,{supBasisText})</span>
                   {supUnreasonable && <span style={{ fontSize: 11, color: COLORS.orange }}> ⚠️距現價落差偏大,請人工核對</span>}
                 </InfoLine>
                 );
