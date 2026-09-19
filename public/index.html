@@ -1760,15 +1760,30 @@ function StockAnalyzer() {
                 盤中即時報價
               </div>
             )}
+            {result.isPendingTodayUpdate && (
+              <div style={{ fontSize: 11, color: COLORS.orange, border: `1px solid ${COLORS.orange}`, borderRadius: 4, padding: '2px 6px' }}>
+                今日已收盤,資料來源更新中
+              </div>
+            )}
           </div>
           {result.isLiveSession && (
             <div style={{ fontSize: 11.5, color: COLORS.textSecondary, marginTop: 2 }}>
               現在是台股交易時段內,以上為即時跳動報價,收盤後數字才會定案
             </div>
           )}
+          {result.isPendingTodayUpdate && (
+            <div style={{ fontSize: 11.5, color: COLORS.textSecondary, marginTop: 2 }}>
+              今天({result.dataAsOfDate})已經收盤,但Yahoo歷史K線資料來源還沒同步更新今天的收盤價,以上為官方即時報價來源目前的最新成交價,技術指標仍以最後定案的收盤資料計算,建議稍後(約1~2小時後)再查詢確認最終數字是否有變動
+            </div>
+          )}
+          {result.noTodayDataYet && (
+            <div style={{ fontSize: 11.5, color: COLORS.orange, marginTop: 2 }}>
+              ⚠️今天已開盤,但目前查無今日任何報價資料,以上顯示的是最近一個交易日({result.dataAsOfDate})的收盤價,並非今天的資料,請稍後再試
+            </div>
+          )}
           {result.priceDiscrepancy && (
             <div style={{ fontSize: 12, color: COLORS.orange, background: 'rgba(255,171,92,0.1)', border: `1px solid ${COLORS.orange}`, borderRadius: 4, padding: '6px 10px', marginTop: 6 }}>
-              ⚠️資料來源價格落差提醒:Yahoo現價{result.priceDiscrepancy.yahooPrice},證交所官方報價{result.priceDiscrepancy.twsePrice},
+              ⚠️資料來源價格落差提醒:Yahoo現價{result.priceDiscrepancy.yahooPrice},證交所官方收盤價{result.priceDiscrepancy.twsePrice},
               落差{result.priceDiscrepancy.gapPct}%,可能其中一方資料延遲或異常,漲跌方向與百分比可能不準確,建議交叉確認
             </div>
           )}
