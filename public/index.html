@@ -495,17 +495,33 @@ function computeSupportResistance(highs, lows, lastPrice, closes = null, pivotWi
   let nearestSupport = supportClusters.find(c => c.touches >= 2) || supportClusters[0] || null;
 
   // ATR合成關卡退路:近半年樞紐點如果剛好都離現價很遠,或根本沒有樞紐點,改用「現價±2倍ATR」
-  // 算一個貼近現價的合成關卡,並標記isSynthetic,跟每日報表PowerShell版本的Get-SupportResistanceLevels邏輯一致
+  // 算一個貼近現價的合成關卡,並標記isSynthetic,跟每日報表PowerShell版本的Get-SupportResistanceLevels邏輯一致。
+  // 三個必要的邊界防護(與PS版同步):
+  //   (1) 合成支撐必須大於0——低價高波動股可能出現2倍ATR大於股價本身,算出負數價位;
+  //   (2) 合成值必須真的比原關卡更近才替換——否則原關卡距現價25%、ATR算出來40%的情況下,
+  //       替換反而讓數字更離譜,跟當初加這段的目的背道而馳;
+  //   (3) 原本就沒有關卡時直接採用合成值(仍受(1)限制)
   if (closes && closes.length >= 15) {
     const atr = computeATR(closes, highs, lows, 14);
     if (atr && atr > 0) {
+      const synthResistPrice = +(lastPrice + 2 * atr).toFixed(2);
+      const synthResistDist = ((synthResistPrice - lastPrice) / lastPrice) * 100;
       const resistanceDistPct = nearestResistance ? ((nearestResistance.price - lastPrice) / lastPrice) * 100 : null;
-      if (!nearestResistance || resistanceDistPct > 20) {
-        nearestResistance = { price: +(lastPrice + 2 * atr).toFixed(2), touches: 0, isSynthetic: true };
+      if (!nearestResistance) {
+        nearestResistance = { price: synthResistPrice, touches: 0, isSynthetic: true };
+      } else if (resistanceDistPct > 20 && synthResistDist < resistanceDistPct) {
+        nearestResistance = { price: synthResistPrice, touches: 0, isSynthetic: true };
       }
-      const supportDistPct = nearestSupport ? ((lastPrice - nearestSupport.price) / lastPrice) * 100 : null;
-      if (!nearestSupport || supportDistPct > 20) {
-        nearestSupport = { price: +(lastPrice - 2 * atr).toFixed(2), touches: 0, isSynthetic: true };
+
+      const synthSupportPrice = +(lastPrice - 2 * atr).toFixed(2);
+      if (synthSupportPrice > 0) {
+        const synthSupportDist = ((lastPrice - synthSupportPrice) / lastPrice) * 100;
+        const supportDistPct = nearestSupport ? ((lastPrice - nearestSupport.price) / lastPrice) * 100 : null;
+        if (!nearestSupport) {
+          nearestSupport = { price: synthSupportPrice, touches: 0, isSynthetic: true };
+        } else if (supportDistPct > 20 && synthSupportDist < supportDistPct) {
+          nearestSupport = { price: synthSupportPrice, touches: 0, isSynthetic: true };
+        }
       }
     }
   }
@@ -1042,7 +1058,14 @@ async function fetchIntraday(code) {
       const minutes = hh * 60 + mm;
       return minutes >= 9 * 60 && minutes <= 13 * 60 + 30;
     });
-    return filtered.length > 0 ? filtered : data.points;
+    // 回傳完整物件而非只有點陣列:sessionDate / isToday / previousClose 都是誠實標示這份
+    // 資料屬於哪一天、以及畫昨收基準線所必需的,只回點陣列的話前端無從判斷
+    return {
+      ...data,
+      points: filtered.length > 0 ? filtered : data.points,
+      // 過濾後沒東西代表這批資料整個落在交易時段之外(例如盤後零星成交),據實標記讓前端提醒
+      outsideSessionHours: filtered.length === 0,
+    };
   } catch (e) {
     return null;
   }
@@ -1073,6 +1096,109 @@ function resolveStockCode(input, nameMap) {
 }
 
 // ================= UI元件 =================
+
+function IntradayChart({ data, name, code }) {
+  const priceBoxRef = React.useRef(null);
+  const volBoxRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!data || !data.points || data.points.length < 2 || !priceBoxRef.current) return;
+
+    // Lightweight Charts 的 UNIX timestamp 一律以 UTC 呈現時刻,沒有時區設定可用。
+    // 台股分時圖要顯示 09:00~13:30 的台北時間,所以把時間戳統一加上 8 小時,
+    // 讓圖表以 UTC 畫出來的刻度剛好等於台北時間(這是這套圖表函式庫的標準做法)
+    const TAIPEI_OFFSET = 8 * 3600;
+    const priceData = data.points.map((p) => ({ time: p.time + TAIPEI_OFFSET, value: +p.price.toFixed(2) }));
+    const prevClose = data.previousClose;
+
+    // 整段走勢在昨收之上就用紅色、之下用綠色(台股紅漲綠跌),沒有昨收資料時退回中性藍色
+    const lastPrice = data.points[data.points.length - 1].price;
+    const lineColor = prevClose == null ? COLORS.blue : (lastPrice >= prevClose ? COLORS.up : COLORS.down);
+
+    const commonOpts = {
+      layout: { background: { color: COLORS.card }, textColor: COLORS.textSecondary, fontFamily: "'JetBrains Mono', monospace" },
+      grid: { vertLines: { color: 'rgba(255,255,255,0.04)' }, horzLines: { color: 'rgba(255,255,255,0.04)' } },
+      timeScale: { borderColor: COLORS.border, timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: COLORS.border },
+      crosshair: { mode: 0 },
+      handleScroll: false, handleScale: false,
+    };
+
+    priceBoxRef.current.innerHTML = '';
+    const priceChart = LightweightCharts.createChart(priceBoxRef.current, { ...commonOpts, height: 180 });
+    const areaSeries = priceChart.addAreaSeries({
+      lineColor, lineWidth: 2,
+      topColor: lineColor === COLORS.up ? 'rgba(255,82,82,0.25)' : lineColor === COLORS.down ? 'rgba(46,204,113,0.25)' : 'rgba(77,166,255,0.25)',
+      bottomColor: 'rgba(0,0,0,0)',
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    });
+    areaSeries.setData(priceData);
+    // 昨收基準線:分時圖判斷漲跌的分界,沒有這條線只看絕對價格很難一眼看出當下是漲是跌
+    if (prevClose != null) {
+      areaSeries.createPriceLine({
+        price: +prevClose.toFixed(2), color: COLORS.textMuted, lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '昨收',
+      });
+    }
+    priceChart.timeScale().fitContent();
+
+    const charts = [priceChart];
+    // 每分鐘成交量:分時走勢配上量能,才看得出價格變動當下有沒有量在推
+    const hasVolume = data.points.some((p) => p.volume > 0);
+    if (hasVolume && volBoxRef.current) {
+      volBoxRef.current.innerHTML = '';
+      const volChart = LightweightCharts.createChart(volBoxRef.current, { ...commonOpts, height: 70 });
+      const volSeries = volChart.addHistogramSeries({ priceFormat: { type: 'volume' } });
+      volSeries.setData(data.points.map((p, i) => ({
+        time: p.time + TAIPEI_OFFSET,
+        value: p.volume,
+        // 相對前一分鐘上漲的分鐘用紅色、下跌用綠色,與台股紅漲綠跌一致
+        color: (i === 0 || p.price >= data.points[i - 1].price) ? 'rgba(255,82,82,0.6)' : 'rgba(46,204,113,0.6)',
+      })));
+      volChart.timeScale().fitContent();
+      charts.push(volChart);
+      charts.forEach((c, idx) => {
+        c.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+          if (!range) return;
+          charts.forEach((other, j) => { if (j !== idx) other.timeScale().setVisibleLogicalRange(range); });
+        });
+      });
+    }
+
+    return () => { charts.forEach((c) => c.remove()); };
+  }, [data]);
+
+  if (!data || !data.points || data.points.length < 2) return null;
+
+  const hasVolume = data.points.some((p) => p.volume > 0);
+  // 標題必須誠實說明這是哪一天的走勢:非交易日或盤前查詢時,Yahoo回的是上一個交易日的資料,
+  // 不標清楚使用者會誤以為是今天(這正是2426那次問題的同一類陷阱)
+  const headerText = data.isLiveSession
+    ? '今日分時走勢(盤中即時,持續變動中)'
+    : data.isToday
+      ? '今日分時走勢(今日已收盤)'
+      : `分時走勢 — 資料日期 ${data.sessionDate}(非今日,今天尚未開盤或非交易日)`;
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 12, color: data.isToday ? COLORS.textSecondary : COLORS.orange, marginBottom: 4 }}>
+        {headerText}{data.previousClose != null ? ` · 昨收 ${data.previousClose.toFixed(2)}(虛線)` : ''}
+      </div>
+      {data.outsideSessionHours && (
+        <div style={{ fontSize: 11, color: COLORS.orange, marginBottom: 4 }}>
+          ⚠️這批資料不在 09:00~13:30 的正常交易時段內,可能為盤後零星成交或資料異常,僅供參考
+        </div>
+      )}
+      <div ref={priceBoxRef} style={{ borderRadius: 8, overflow: 'hidden' }} />
+      {hasVolume && (
+        <>
+          <div style={{ fontSize: 11, color: COLORS.textMuted, margin: '6px 0 2px' }}>每分鐘成交量</div>
+          <div ref={volBoxRef} style={{ borderRadius: 8, overflow: 'hidden' }} />
+        </>
+      )}
+    </div>
+  );
+}
 
 function DailyChart({ opens, highs, lows, closes, volumes, timestamps, name, code }) {
   const priceBoxRef = React.useRef(null);
@@ -1378,9 +1504,9 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData] = await Promise.all([
+    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData, intraday] = await Promise.all([
       fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(),
-      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'),
+      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'), fetchIntraday(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
@@ -1416,7 +1542,7 @@ function StockAnalyzer() {
       shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
       dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
-      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo,
+      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday,
     };
     setResult(fullResult);
     setUpdatedAt(new Date());
@@ -1804,6 +1930,7 @@ function StockAnalyzer() {
             </div>
           )}
 
+          <IntradayChart data={result.intraday} name={result.name} code={result.code} />
           <DailyChart opens={result.opens} highs={result.highs} lows={result.lows} closes={result.closes}
             volumes={result.volumes} timestamps={result.timestamps} name={result.name} code={result.code} />
           <Gauge score={result.score} conclusion={result.conclusion} />
