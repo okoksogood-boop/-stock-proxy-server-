@@ -130,6 +130,57 @@ function computeSwingHighBreakout(closes, highs, lookback = 60) {
   return { priorHigh: +priorHigh.toFixed(2), confirmed: closes[n - 1] > priorHigh };
 }
 
+// 洗盤 vs 真出貨判讀(日線級,與每日股票趨勢報表的 Get-ShakeoutSignal 同一套邏輯)
+// 【這在回答什麼問題】上漲途中突然急殺,是主力「洗掉浮額」(後面還有戲),還是主力自己在倒貨?
+// 【日線級怎麼分辨】差別在「量」與「有沒有守住月線」:
+//   · 洗盤:主力沒真的賣 → 急殺當天量不會明顯放大,且通常守住月線
+//   · 真出貨:主力實際在賣 → 籌碼流出必然放量,而且會跌破關鍵支撐
+// 【限制】這是從日線量價反推主力「意圖」,本質是推論不是事實。真正確認需要券商分點進出與
+// 逐筆成交明細,證交所免費資料沒有這兩項,所以輸出一律用「疑似」措辭。
+function computeShakeoutSignal(closes, volumes) {
+  if (!closes || closes.length < 25 || !volumes || volumes.length < 25) return null;
+  const last = closes[closes.length - 1];
+  const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const ma20 = avg(closes.slice(-20));
+  if (ma20 <= 0) return null;
+
+  // 前提一:中期趨勢要仍然偏多——本來就在跌的股票急殺只是續跌,談不上洗盤
+  const ma20Prev = avg(closes.slice(-25, -5));
+  if (!(ma20 > ma20Prev)) return null;
+
+  // 前提二:近5日要真的有明顯回檔,沒有回檔就沒有洗盤與否的問題
+  const rc = closes.slice(-6);
+  let maxDayDrop = 0;
+  for (let i = 1; i < rc.length; i++) {
+    const d = ((rc[i] - rc[i - 1]) / rc[i - 1]) * 100;
+    if (d < maxDayDrop) maxDayDrop = d;
+  }
+  const peak5 = Math.max(...closes.slice(-6));
+  const pullbackPct = ((last - peak5) / peak5) * 100;
+  if (!(maxDayDrop <= -3.0 || pullbackPct <= -5.0)) return null;
+
+  // 量能比較:回檔這幾天的均量 vs 回檔之前20日的均量
+  const recentVolAvg = avg(volumes.slice(-3));
+  const baseVolAvg = avg(volumes.slice(-23, -3));
+  if (baseVolAvg <= 0) return null;
+  const volRatio = +(recentVolAvg / baseVolAvg).toFixed(2);
+
+  // 有沒有守住月線(留2%緩衝,避免剛好差一點點就判成破線)
+  const holdMa20 = last >= ma20 * 0.98;
+  const ma20R = +ma20.toFixed(2);
+
+  if (holdMa20 && volRatio < 1.2) {
+    return { type: '疑似洗盤', volRatio, holdMa20: true,
+      detail: `上漲趨勢中出現回檔(近5日最大單日跌幅${maxDayDrop.toFixed(1)}%、距近期高點${pullbackPct.toFixed(1)}%),但回檔期間量能僅為前20日均量的${volRatio}倍(未明顯放大),且仍守住月線${ma20R}元。量縮回檔且守住支撐,較偏向洗掉浮額而非主力出貨` };
+  }
+  if (!holdMa20 && volRatio >= 1.5) {
+    return { type: '疑似真出貨', volRatio, holdMa20: false,
+      detail: `上漲趨勢中出現回檔(近5日最大單日跌幅${maxDayDrop.toFixed(1)}%),回檔期間量能放大到前20日均量的${volRatio}倍,且已跌破月線${ma20R}元。量增破線,籌碼實際流出的可能性較高,與單純洗盤不同` };
+  }
+  return { type: '回檔性質未明', volRatio, holdMa20,
+    detail: `上漲趨勢中出現回檔,但量能(${volRatio}倍)與月線${ma20R}元的${holdMa20 ? '守住' : '跌破'}狀況未同時符合洗盤或出貨的典型特徵,方向尚不明朗,建議再觀察1~2個交易日` };
+}
+
 // 飆股拉回均線:過去20日漲幅≥20%的強勢股,現價拉回接近MA5或MA10(±2%以內)
 function computeSurgePullbackToMA(closes, ma5, ma10, lookback = 20, surgeThreshold = 20) {
   const n = closes.length;
@@ -666,6 +717,8 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code, liveQuote
   const rallySignal = computeRallyStartSignal(adj.opens, adj.highs, adj.lows, adj.closes, volumes);
   const swingHighBreakout = computeSwingHighBreakout(adj.closes, adj.highs);
   const surgePullback = computeSurgePullbackToMA(adj.closes, ma5, ma10);
+  // 洗盤 vs 真出貨判讀:上漲途中的急殺,是洗掉浮額還是主力在倒貨
+  const shakeoutSignal = computeShakeoutSignal(adj.closes, data.volumes);
   const maEntanglement = computeMAEntanglement(ma5, ma10, ma20);
   const trustFirstBuy = code ? getTrustFirstBuy(code) : null;
   const vwapInfo = computeVWAP(adj.closes, adj.highs, adj.lows, volumes);
@@ -708,7 +761,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code, liveQuote
     last: +last.toFixed(2), dayChangePct, ma5, ma10, ma20, kd, rsi, macd, biasInfo, upDaysInfo,
     volTrend, volRatio, volumeDivergence, crossInfo, stopLoss, tomorrowOutlook,
     conclusion, score, todayVolZhang, triggerAlert, tradingCost, rallySignal,
-    swingHighBreakout, surgePullback, maEntanglement, trustFirstBuy,
+    swingHighBreakout, surgePullback, shakeoutSignal, maEntanglement, trustFirstBuy,
     vwapInfo, bollingerInfo, weeklyTrendInfo, monthlyTrendInfo,
   };
 }
@@ -1949,6 +2002,24 @@ function StockAnalyzer() {
               🎯飆股拉回買點(近20日已漲{result.surgePullback.surgePct}%,現價拉回貼近{result.surgePullback.maTouched})
             </div>
           )}
+          {result.shakeoutSignal && (() => {
+            // 台股紅漲綠跌:洗盤(趨勢未破、仍偏多)用紅、真出貨(偏空)用綠、性質未明用黃
+            const sk = result.shakeoutSignal;
+            const cfg = sk.type === '疑似洗盤'
+              ? { icon: '🫧', color: COLORS.up,   bg: 'rgba(255,82,82,0.12)',  bd: 'rgba(255,82,82,0.4)' }
+              : sk.type === '疑似真出貨'
+              ? { icon: '📉', color: COLORS.down, bg: 'rgba(46,204,113,0.12)', bd: 'rgba(46,204,113,0.4)' }
+              : { icon: '❔', color: COLORS.yellow, bg: 'rgba(255,210,63,0.12)', bd: 'rgba(255,210,63,0.4)' };
+            return (
+              <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: cfg.bg, border: `1px solid ${cfg.bd}` }}>
+                <div style={{ color: cfg.color, fontSize: 13, fontWeight: 600 }}>{cfg.icon}{sk.type}</div>
+                <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>{sk.detail}</div>
+                <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 4, lineHeight: 1.4 }}>
+                  ※此為從日線量價反推主力意圖的「推論」,不是事實。真正確認主力行為需要券商分點進出與逐筆成交明細,證交所免費資料沒有這兩項,故一律以「疑似」表述
+                </div>
+              </div>
+            );
+          })()}
           {result.trustFirstBuy && result.trustFirstBuy.confirmed && (
             <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(240,215,137,0.15)', border: '1px solid rgba(240,215,137,0.4)', color: '#f0d789', fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
               🆕投信首購(近{result.trustFirstBuy.checkedDays}個交易日無買超紀錄,今日由賣轉買;此為本機瀏覽器查詢紀錄,並非官方逐日資料)
