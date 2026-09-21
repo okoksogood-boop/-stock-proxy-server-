@@ -619,10 +619,29 @@ function computePriceMilestone(closes) {
 }
 
 // 相對強弱RS:個股近N日報酬率減去大盤加權指數(TWII)同期報酬率,正值代表比大盤強,與每日報表Get-RelativeStrength邏輯一致
-function computeRelativeStrength(closes, benchmarkCloses, days = 20) {
+function computeRelativeStrength(closes, benchmarkCloses, days = 20, timestamps = null, benchmarkTimestamps = null) {
   if (closes.length < days + 1 || !benchmarkCloses || benchmarkCloses.length < days + 1) return null;
-  const stockReturn = ((closes[closes.length - 1] - closes[closes.length - 1 - days]) / closes[closes.length - 1 - days]) * 100;
-  const benchReturn = ((benchmarkCloses[benchmarkCloses.length - 1] - benchmarkCloses[benchmarkCloses.length - 1 - days]) / benchmarkCloses[benchmarkCloses.length - 1 - days]) * 100;
+  // ---- 用日期對齊,不用陣列位置(與每日股票趨勢報表的 Get-RelativeStrength 同一套邏輯) ----
+  // 【原本的錯誤】直接拿個股與大盤各自的最後一筆比較。但Yahoo的大盤指數會落後個股一個交易日
+  // (2026/09/22 實測:個股已有週一,大盤只到上週五),兩邊的「最後一筆」是不同的日子,
+  // 算出來等於「個股到週一的漲幅」減「大盤到週五的漲幅」。以2449實測:錯誤算法得出RS +1.50,
+  // 正確值應為 +8.07,差距很大。
+  // 【修法】找出兩邊都有的最新日期,以那天為終點往回算同樣的交易日數
+  let stockEnd = closes.length - 1, benchEnd = benchmarkCloses.length - 1;
+  if (timestamps && benchmarkTimestamps && timestamps.length === closes.length && benchmarkTimestamps.length === benchmarkCloses.length) {
+    const toTpeDate = (sec) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(sec * 1000));
+    const benchIdxByDate = {};
+    benchmarkTimestamps.forEach((t, i) => { benchIdxByDate[toTpeDate(t)] = i; });
+    let found = false;
+    for (let i = closes.length - 1; i >= 0; i--) {
+      const d = toTpeDate(timestamps[i]);
+      if (d in benchIdxByDate) { stockEnd = i; benchEnd = benchIdxByDate[d]; found = true; break; }
+    }
+    if (!found) return null;   // 兩邊沒有任何共同日期,無從比較
+  }
+  if (stockEnd < days || benchEnd < days) return null;
+  const stockReturn = ((closes[stockEnd] - closes[stockEnd - days]) / closes[stockEnd - days]) * 100;
+  const benchReturn = ((benchmarkCloses[benchEnd] - benchmarkCloses[benchEnd - days]) / benchmarkCloses[benchEnd - days]) * 100;
   const rs = +(stockReturn - benchReturn).toFixed(2);
   const label = rs > 0 ? '強於大盤' : rs < 0 ? '弱於大盤' : '與大盤同步';
   return { stockReturn: +stockReturn.toFixed(2), benchmarkReturn: +benchReturn.toFixed(2), rs, label };
@@ -881,15 +900,30 @@ function isTradingWindow() {
   return isWeekday && isTradingTime;
 }
 
-function recordFlowHistory(code, flow) {
+function recordFlowHistory(code, flow, dataTimestamps) {
   if (!flow) return;
   try {
     const key = 'tw_stock_flow_history';
     const all = JSON.parse(localStorage.getItem(key) || '[]');
-    const today = getTaipeiDateStr();
-    // 若今天已經記錄過這檔股票,不重複記錄(避免同一天查詢多次造成資料失真)
-    if (all.some((r) => r.code === code && r.date === today)) return;
-    all.push({ date: today, code, ...flow });
+    // ---- 用「資料本身的日期」當鍵,而不是查詢當天的日曆日期 ----
+    // 【原本的錯誤】用查詢當天日期當鍵,配合「同一天只記一次」:
+    //   · 週末查詢 → 把上週五的法人資料記成週六,「連續買超天數」被灌水
+    //   · 週一開盤前查詢 → 把週五資料記成週一,之後收盤後的正確資料反而被擋掉
+    // 這跟每日股票趨勢報表先前修掉的是同一個問題(詳見該工具技術教訓第84條),網頁版一直沒同步。
+    // 【修法】改用這檔股票最新一根K棒的日期(後端已移除幽靈K棒),並且只在該交易日已收盤時才記錄——
+    // 盤中的法人數字還在變動,不是最終值
+    const toTpeDate = (sec) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(new Date(sec * 1000));
+    if (!dataTimestamps || dataTimestamps.length === 0) return;   // 無法判斷資料日期時寧可不記,以免記錯日期
+    const dataDate = toTpeDate(dataTimestamps[dataTimestamps.length - 1]);
+    const todayStr = getTaipeiDateStr();
+    if (dataDate === todayStr) {
+      const nowParts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
+      const hh = +nowParts.find((x) => x.type === 'hour').value;
+      const mm = +nowParts.find((x) => x.type === 'minute').value;
+      if (hh * 60 + mm < 14 * 60 + 30) return;   // 當天盤中,資料尚未定案
+    }
+    if (all.some((r) => r.code === code && r.date === dataDate)) return;
+    all.push({ date: dataDate, code, ...flow });
     // 只保留最近90筆同一檔股票的記錄,避免localStorage無限增長
     const trimmed = all.filter((r) => r.code !== code).concat(
       all.filter((r) => r.code === code).slice(-90)
@@ -1566,7 +1600,7 @@ function StockAnalyzer() {
 
     const dayTradeInfo = computeDayTradeInfo(data.code, twseSnapshot, disposition);
 
-    recordFlowHistory(cleaned, flow);
+    recordFlowHistory(cleaned, flow, data.timestamps);
     const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
     const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
@@ -1574,7 +1608,7 @@ function StockAnalyzer() {
     const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens, data.code, data.liveQuote);
     // 相對強弱RS(需要大盤TWII同期收盤價當基準,月線趨勢已內建在analyze()裡)
     const adjForExtra = getAdjustedSeries(data.closes, data.highs, data.lows, data.adjCloses, data.opens);
-    const relativeStrengthInfo = (benchmarkData && benchmarkData.closes) ? computeRelativeStrength(adjForExtra.closes, benchmarkData.closes, 20) : null;
+    const relativeStrengthInfo = (benchmarkData && benchmarkData.closes) ? computeRelativeStrength(adjForExtra.closes, benchmarkData.closes, 20, data.timestamps, benchmarkData.timestamps) : null;
     // 支撐/壓力關卡、成交量密集區、近半年新高/新低:皆為純價量計算,不需要額外API,
     // 與每日報表PowerShell版本邏輯一致(詳見上方函式註解)
     const lastPriceForExtra = adjForExtra.closes[adjForExtra.closes.length - 1];
