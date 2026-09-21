@@ -718,7 +718,7 @@ function analyze(closes, highs, lows, volumes, adjCloses, opens, code, liveQuote
   const swingHighBreakout = computeSwingHighBreakout(adj.closes, adj.highs);
   const surgePullback = computeSurgePullbackToMA(adj.closes, ma5, ma10);
   // 洗盤 vs 真出貨判讀:上漲途中的急殺,是洗掉浮額還是主力在倒貨
-  const shakeoutSignal = computeShakeoutSignal(adj.closes, data.volumes);
+  const shakeoutSignal = computeShakeoutSignal(adj.closes, volumes);
   const maEntanglement = computeMAEntanglement(ma5, ma10, ma20);
   const trustFirstBuy = code ? getTrustFirstBuy(code) : null;
   const vwapInfo = computeVWAP(adj.closes, adj.highs, adj.lows, volumes);
