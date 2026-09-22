@@ -296,6 +296,103 @@ function computeChaseStatus(bias, rsi) {
   return '可追';
 }
 
+// ==================== 選股分 / 時機分 / 四象限(新評分,試行中) ====================
+// 【⚠️與每日股票趨勢報表同步】這三個函式與PowerShell版的 Get-SelectionScore / Get-TimingScore /
+// Get-QuadrantLabel 必須逐行一致。修改任何加減分、門檻、標籤文字時,兩邊都要一起改——
+// 「兩份實作改了一邊忘了另一邊」是這個專案最常發生的問題。
+// 【為什麼拆成兩個分數】舊評分把「這檔值不值得關注」(選股)與「現在是不是好的進場點」(時機)
+// 混在同一個數字裡,兩者方向相反:常常處於強勢的股票是贏家,但同一檔股票在漲多時買進,
+// 短線表現反而較差。這是用實際回測樣本拆解後的發現(各股自比,16檔中13檔均線翻多時進場反而較差)。
+// 【試行中】主報表正與舊評分並行觀察至少20個交易日,確認有效後才會正式採用,規則可能調整。
+
+// 選股分:用變化慢的訊號判斷股票本身的體質與趨勢(4項)
+function computeSelectionScore(yoy, relativeStrength, monthlyTrend, flow20d) {
+  let score = 0, used = 0; const reasons = [];
+  if (yoy != null) {
+    used++; const y = +(+yoy).toFixed(1);
+    if (yoy > 20) { score += 2; reasons.push(`營收年增${y}%(+2)`); }
+    else if (yoy > 0) { score += 1; reasons.push(`營收年增${y}%(+1)`); }
+    else { score -= 1; reasons.push(`營收衰退${y}%(-1)`); }
+  }
+  if (relativeStrength && relativeStrength.rs != null) {
+    used++; const rsv = +relativeStrength.rs;
+    if (rsv > 5) { score += 2; reasons.push(`強於大盤${rsv}個百分點(+2)`); }
+    else if (rsv > 0) { score += 1; reasons.push('略強於大盤(+1)'); }
+    else if (rsv < -5) { score -= 1; reasons.push(`弱於大盤${rsv}個百分點(-1)`); }
+  }
+  if (monthlyTrend && monthlyTrend.trend) {
+    used++;
+    if (monthlyTrend.trend === '月線偏多') { score += 1; reasons.push('月線偏多(+1)'); }
+    else if (monthlyTrend.trend === '月線偏空') { score -= 1; reasons.push('月線偏空(-1)'); }
+  }
+  if (flow20d != null) {
+    used++;
+    if (flow20d > 0) { score += 1; reasons.push('法人20日累計買超(+1)'); }
+    else if (flow20d < 0) { score -= 1; reasons.push('法人20日累計賣超(-1)'); }
+  }
+  return { score, reasons: reasons.join('、'), used, total: 4 };
+}
+
+// 時機分:核心概念是「強勢股拉回了多少」,而不是「漲得多強」(4項)
+function computeTimingScore(bias, rsi, upDays, supportResistance, lastPrice) {
+  let score = 0, used = 0; const reasons = [];
+  if (bias != null) {
+    used++; const b = +(+bias).toFixed(1);
+    if (bias > 15) { score -= 2; reasons.push(`乖離率${b}%漲多(-2)`); }
+    else if (bias > 8) { score -= 1; reasons.push(`乖離率${b}%偏高(-1)`); }
+    // 拉回加分只給「月線附近」:跌太深(乖離<-5%)可能是趨勢轉弱而非拉回,不加分
+    else if (bias >= -5 && bias < 3) { score += 1; reasons.push(`乖離率${b}%已拉回至月線附近(+1)`); }
+  }
+  // 只採計真正的樞紐支撐,ATR合成的支撐只是波動區間估算,不加分
+  if (supportResistance && supportResistance.support && !supportResistance.support.isSynthetic && lastPrice > 0) {
+    used++;
+    const sd = ((lastPrice - supportResistance.support.price) / lastPrice) * 100;
+    if (sd >= 0 && sd <= 3) { score += 2; reasons.push(`距支撐僅${+sd.toFixed(1)}%(+2)`); }
+  }
+  if (rsi != null) {
+    used++;
+    if (rsi > 80) { score -= 1; reasons.push(`RSI=${rsi}超買(-1)`); }
+  }
+  if (upDays != null) {
+    used++;
+    if (upDays >= 5) { score -= 1; reasons.push(`連漲${upDays}日(-1)`); }
+  }
+  return { score, reasons: reasons.join('、'), used, total: 4 };
+}
+
+// 四象限:選股分≥2 視為優質、時機分≥1 視為時機好。顏色依台股紅漲綠跌慣例
+function computeQuadrantLabel(sel, tim) {
+  if (!sel || !tim) return null;
+  const selHigh = sel.score >= 2, timGood = tim.score >= 1;
+  const key = selHigh ? (timGood ? '優質・可進場' : '優質・等拉回') : (timGood ? '一般・短線機會' : '暫不考慮');
+  const style = {
+    '優質・可進場': { icon: '🔴', color: COLORS.up },
+    '優質・等拉回': { icon: '⭕', color: '#ff9a9a' },
+    '一般・短線機會': { icon: '🟡', color: COLORS.yellow },
+    '暫不考慮': { icon: '🟢', color: COLORS.down },
+  }[key];
+  const incomplete = sel.used < 3 || tim.used < 3;
+  return { key, icon: style.icon, color: style.color, incomplete, selScore: sel.score, timScore: tim.score, selReasons: sel.reasons, timReasons: tim.reasons };
+}
+
+// 法人20日累計(網頁版專用):本機記錄只在「查詢該股時」才記一筆,不像主報表每天都記。
+// 若近期查詢次數太少,加總起來只有少數幾天,拿來當「20日累計」會是錯的數字。
+// 因此只在近28天內至少有15天記錄時才納入(評分只看買超或賣超的方向,15/20天足以判斷),
+// 否則回傳null,不列入選股分——這也是同一檔股票在網頁版與主報表可能顯示不同標籤的原因
+function computeLocalFlow20d(code) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const cutoff = new Date(Date.now() - 28 * 86400000);
+    const cutoffStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(cutoff);
+    const recs = all.filter((r) => r.code === code && r.date >= cutoffStr && r.totalNet != null)
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    const days = new Set(recs.map((r) => r.date)).size;
+    if (days < 15) return { value: null, days };
+    const sum = recs.slice(0, 20).reduce((acc, r) => acc + (+r.totalNet || 0), 0);
+    return { value: sum, days };
+  } catch (e) { return { value: null, days: 0 }; }
+}
+
 // 短中期訊號綜合判讀:把可追狀態(短線)、月線趨勢+相對強弱(中期)整合成一句話,
 // 與每日報表Get-ShortMidSyncLine邏輯一致,7種組合用符號+文字快速分辨嚴重程度
 function computeShortMidSyncLine(chaseStatus, monthlyTrend, rsLabel) {
@@ -1613,6 +1710,19 @@ function StockAnalyzer() {
     // 與每日報表PowerShell版本邏輯一致(詳見上方函式註解)
     const lastPriceForExtra = adjForExtra.closes[adjForExtra.closes.length - 1];
     const supportResistanceInfo = computeSupportResistance(adjForExtra.highs, adjForExtra.lows, lastPriceForExtra, adjForExtra.closes);
+    // 四象限新評分(試行中)。注意:距支撐要用「還原股價」的現價,因為支撐關卡本身就是用
+    // 還原股價算出來的;若混用畫面上的原始現價,最近除息過的股票會算出錯誤的距離
+    const localFlow20 = computeLocalFlow20d(cleaned);
+    const selectionScore = computeSelectionScore(revenue ? revenue.yoy : null, relativeStrengthInfo, analysis.monthlyTrendInfo, localFlow20.value);
+    const timingScore = computeTimingScore(
+      analysis.biasInfo ? analysis.biasInfo.bias : null,
+      analysis.rsi,
+      analysis.upDaysInfo ? analysis.upDaysInfo.upDays : null,
+      supportResistanceInfo,
+      lastPriceForExtra
+    );
+    const quadrantInfo = computeQuadrantLabel(selectionScore, timingScore);
+    if (quadrantInfo) { quadrantInfo.flowDays = localFlow20.days; }
     const volumeConcentrationInfo = computeVolumeConcentration(adjForExtra.closes, data.volumes, lastPriceForExtra);
     const priceMilestoneInfo = computePriceMilestone(adjForExtra.closes);
     // 中文名稱查詢:優先用上市快照,查不到再嘗試上櫃備援查詢(與報表系統邏輯一致)
@@ -1629,7 +1739,7 @@ function StockAnalyzer() {
       shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
       dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
-      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday,
+      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday, quadrantInfo,
     };
     setResult(fullResult);
     setUpdatedAt(new Date());
@@ -2251,6 +2361,24 @@ function StockAnalyzer() {
               </span>
               ({result.relativeStrengthInfo.label})
             </InfoLine>
+          )}
+
+          {result.quadrantInfo && (
+            <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: `1px solid ${result.quadrantInfo.color}55` }}>
+              <div style={{ color: result.quadrantInfo.color, fontSize: 15, fontWeight: 700 }}>
+                {result.quadrantInfo.icon}{result.quadrantInfo.key}
+                {result.quadrantInfo.incomplete && <span style={{ color: COLORS.textMuted, fontSize: 12, fontWeight: 400 }}>(資料不完整)</span>}
+              </div>
+              <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 5, lineHeight: 1.6 }}>
+                選股分 {result.quadrantInfo.selScore}:{result.quadrantInfo.selReasons || '無明顯依據'}
+                <br />
+                時機分 {result.quadrantInfo.timScore}:{result.quadrantInfo.timReasons || '無明顯依據'}
+              </div>
+              <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 5, lineHeight: 1.5 }}>
+                ※試行中的新評分,把「這檔值不值得關注」與「現在適不適合進場」分開判斷,與每日報表的現行評分並行觀察至少20個交易日,確認有效後才會正式採用。
+                {result.quadrantInfo.flowDays < 15 && `法人20日累計因本機記錄只有${result.quadrantInfo.flowDays}天(需15天以上)而未納入,所以同一檔股票在每日報表可能顯示不同標籤。`}
+              </div>
+            </div>
           )}
 
           {(result.monthlyTrendInfo || result.relativeStrengthInfo) && (() => {
