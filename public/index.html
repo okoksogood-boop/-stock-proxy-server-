@@ -2094,6 +2094,13 @@ function StockAnalyzer() {
                 {result.dayChangePct >= 0 ? '▲' : '▼'}{Math.abs(result.dayChangePct).toFixed(2)}%
               </div>
             )}
+            {/* 漲跌幅算出0%時,用證交所官方當日漲跌確認是真平盤還是資料有問題。
+                Yahoo偶爾會給出與前一日相同的收盤價,光看數字無從分辨。與主報表做法一致 */}
+            {result.dayChangePct != null && Math.abs(result.dayChangePct) < 0.005 && result.officialChange != null && (
+              <div style={{ fontSize: 11, color: Math.abs(result.officialChange) < 0.001 ? COLORS.textMuted : COLORS.orange, border: `1px solid ${Math.abs(result.officialChange) < 0.001 ? COLORS.textMuted : COLORS.orange}`, borderRadius: 4, padding: '2px 6px' }}>
+                {Math.abs(result.officialChange) < 0.001 ? '證交所確認平盤' : `⚠️證交所當日漲跌 ${result.officialChange},與此處不符`}
+              </div>
+            )}
             {result.isLiveSession && (
               <div style={{ fontSize: 11, color: COLORS.pink, border: `1px solid ${COLORS.pink}`, borderRadius: 4, padding: '2px 6px' }}>
                 盤中即時報價
@@ -2373,6 +2380,16 @@ function StockAnalyzer() {
                 選股分 {result.quadrantInfo.selScore}:{result.quadrantInfo.selReasons || '無明顯依據'}
                 <br />
                 時機分 {result.quadrantInfo.timScore}:{result.quadrantInfo.timReasons || '無明顯依據'}
+              </div>
+              {/* 兩種最常見的誤會,各自講清楚:
+                  「優質・等拉回」容易被當成「可以買」——體質好不等於現在這個價位可以進場;
+                  「一般・短線機會」容易被當成「便宜的好機會」——沒漲多不等於值得買,
+                  這檔的訊號本來就排在後面。與主報表 2026-09-24-D 的說明一致 */}
+              <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 6, lineHeight: 1.6, paddingTop: 6, borderTop: `1px dashed ${COLORS.border}` }}>
+                {result.quadrantInfo.key === '優質・可進場' && '體質與進場時機目前都符合條件。但這是訊號排序的結果,不是買進建議,風險仍需自行評估。'}
+                {result.quadrantInfo.key === '優質・等拉回' && '體質不錯,但現在已經漲多。選股分高不等於「現在可以買」——這兩個是不同的問題,追進去的成本會比較差。'}
+                {result.quadrantInfo.key === '一般・短線機會' && '價位沒有漲多,但體質訊號不佳。「沒漲多」不等於「值得買」,價位便宜可能只是乏人問津,不是被低估。'}
+                {result.quadrantInfo.key === '暫不考慮' && '體質與進場時機兩方面的訊號目前都不支持。'}
               </div>
               <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 5, lineHeight: 1.5 }}>
                 ※試行中的新評分,把「這檔值不值得關注」與「現在適不適合進場」分開判斷,與每日報表的現行評分並行觀察至少20個交易日,確認有效後才會正式採用。
