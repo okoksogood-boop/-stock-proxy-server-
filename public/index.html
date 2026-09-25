@@ -290,10 +290,151 @@ function computeBias(lastPrice, ma20) {
 
 // 統一的「可追/不建議/未知」狀態標示,依乖離率>15%或RSI>80判斷,與每日報表
 // Get-ChaseStatusLabel邏輯一致,確保網頁版跟報表版看到的結論相同
+// ==================== 價格形態辨識(雙底/三角收斂/頭肩底/旗形) ====================
+// 【⚠️與每日股票趨勢報表的 Get-PivotPoints / Get-PricePatterns 同步】門檻數值必須逐項一致。
+// 【門檻怎麼定的】先用人工合成的標準圖形確認四種規則各自只在對的圖形上觸發,再用300組
+// 隨機走勢當對照組測量誤報率:雙底8.0%、三角1.7%、頭肩底5.7%、旗形0.3%。
+// 第一版雙底誤報率高達43%(等於一半股票都會顯示),加上「必須位於近期低檔區」
+// 「中間反彈≥10%」「事前要有明顯下跌」三個條件後才壓下來。
+// 【限制】形態要突破頸線才算確認,形成中的形態有相當比例最後不成立,一律用「疑似」表述。
+function computePivotPoints(highs, lows, w = 4) {
+  const n = highs.length, ph = [], pl = [];
+  if (n < w * 2 + 2) return { highs: [], lows: [] };
+  for (let i = w; i < n - w; i++) {
+    const wh = highs.slice(i - w, i + w + 1), wl = lows.slice(i - w, i + w + 1);
+    if (highs[i] >= Math.max(...wh)) {
+      // 相鄰太近的樞紐只保留較極端的,避免同一個轉折被算成好幾個
+      if (ph.length && i - ph[ph.length - 1].index < w) {
+        if (highs[i] > ph[ph.length - 1].price) ph[ph.length - 1] = { index: i, price: highs[i] };
+      } else ph.push({ index: i, price: highs[i] });
+    }
+    if (lows[i] <= Math.min(...wl)) {
+      if (pl.length && i - pl[pl.length - 1].index < w) {
+        if (lows[i] < pl[pl.length - 1].price) pl[pl.length - 1] = { index: i, price: lows[i] };
+      } else pl.push({ index: i, price: lows[i] });
+    }
+  }
+  return { highs: ph, lows: pl };
+}
+
+function computePricePatterns(highs, lows, closes, volumes) {
+  const found = [], n = closes.length;
+  if (n < 45 || highs.length !== n || lows.length !== n) return found;
+  const piv = computePivotPoints(highs, lows, 4);
+  const ph = piv.highs, pl = piv.lows, last = closes[n - 1];
+
+  // 雙底:兩個價格接近的低點,中間夾一個明顯反彈
+  const winLow = Math.min(...lows.slice(Math.max(0, n - 60)));
+  outer:
+  for (let a = 0; a < pl.length - 1; a++) {
+    for (let b = a + 1; b < pl.length; b++) {
+      const i1 = pl[a].index, p1 = pl[a].price, i2 = pl[b].index, p2 = pl[b].price;
+      const span = i2 - i1;
+      if (span < 12 || span > 60) continue;
+      const lo = Math.min(p1, p2), hiOf = Math.max(p1, p2);
+      if (lo <= 0 || Math.abs(p1 - p2) / lo > 0.03) continue;
+      if (lo > winLow * 1.03) continue;
+      const mids = ph.filter((x) => x.index > i1 && x.index < i2);
+      if (!mids.length) continue;
+      const neck = Math.max(...mids.map((m) => m.price));
+      if ((neck - hiOf) / hiOf < 0.10) continue;
+      const since = n - 1 - i2;
+      if (since > 25 || since < 3) continue;
+      if (Math.min(...lows.slice(i2)) < lo * 0.98) continue;
+      const ps = Math.max(0, i1 - 25), pe = Math.max(1, i1 - 5);
+      if (pe <= ps) continue;
+      if (Math.max(...highs.slice(ps, pe)) < lo * 1.12) continue;
+      found.push({ name: '雙底', neck: +neck.toFixed(2), broken: last > neck });
+      break outer;
+    }
+  }
+
+  // 三角收斂:高點越來越低、低點越來越高,整體區間明顯變窄
+  if (n >= 50) {
+    const look = 45, segH = highs.slice(n - look), segL = lows.slice(n - look);
+    const p2 = computePivotPoints(segH, segL, 4);
+    if (p2.highs.length >= 2 && p2.lows.length >= 2) {
+      const hF = p2.highs[0].price, hL = p2.highs[p2.highs.length - 1].price;
+      const lF = p2.lows[0].price, lL = p2.lows[p2.lows.length - 1].price;
+      const half = Math.floor(look / 2);
+      const eLo = Math.min(...segL.slice(0, half)), eHi = Math.max(...segH.slice(0, half));
+      const lLo = Math.min(...segL.slice(half)), lHi = Math.max(...segH.slice(half));
+      if (eLo > 0 && lLo > 0) {
+        const early = (eHi - eLo) / eLo, late = (lHi - lLo) / lLo;
+        if (hL < hF * 0.985 && lL > lF * 1.015 && late <= early * 0.7) {
+          found.push({ name: '三角收斂', neck: +hL.toFixed(2), broken: last > hL });
+        }
+      }
+    }
+  }
+
+  // 頭肩底:三個低點,中間最低,左右肩高度相近
+  for (let i = 0; i + 2 < pl.length; i++) {
+    const ia = pl[i].index, pa = pl[i].price, pb = pl[i + 1].price, ic = pl[i + 2].index, pc = pl[i + 2].price;
+    if (pb <= 0 || !(pb < pa * 0.97 && pb < pc * 0.97)) continue;
+    const sh = Math.min(pa, pc);
+    if (Math.abs(pa - pc) / sh > 0.06) continue;
+    const width = ic - ia;
+    if (width < 12 || width > 80) continue;
+    const mids = ph.filter((x) => x.index > ia && x.index < ic);
+    if (mids.length < 2) continue;
+    const neck = Math.max(...mids.map((m) => m.price));
+    if ((neck - pb) / pb < 0.08) continue;
+    const since = n - 1 - ic;
+    if (since > 25 || since < 3) continue;
+    if (Math.min(...lows.slice(ic)) < pb) continue;
+    found.push({ name: '頭肩底', neck: +neck.toFixed(2), broken: last > neck });
+    break;
+  }
+
+  // 旗形:一段快速大漲之後,窄幅量縮整理
+  if (volumes && volumes.length === n && n >= 30) {
+    flagLoop:
+    for (let pole = 6; pole <= 12; pole++) {
+      for (let rest = 5; rest <= 15; rest++) {
+        if (pole + rest + 2 > n) continue;
+        const st = n - pole - rest, en = n - rest;
+        if (st < 0 || closes[st] <= 0) continue;
+        if ((closes[en - 1] - closes[st]) / closes[st] < 0.15) continue;
+        const hi = Math.max(...highs.slice(en)), lo2 = Math.min(...lows.slice(en));
+        if (lo2 <= 0 || (hi - lo2) / lo2 > 0.07) continue;
+        if (lo2 < closes[en - 1] * 0.90) continue;
+        const avg = (arr) => arr.reduce((x, y) => x + y, 0) / arr.length;
+        const v1 = avg(volumes.slice(st, en)), v2 = avg(volumes.slice(en));
+        if (v1 <= 0 || v2 > v1 * 0.75) continue;
+        found.push({ name: '旗形', neck: +hi.toFixed(2), broken: last > hi });
+        break flagLoop;
+      }
+    }
+  }
+  return found;
+}
+
+// 可追狀態五級(2026-09-25 由三級細分)
+// 【⚠️與每日股票趨勢報表的 Get-ChaseStatusLabel 同步】門檻與回傳文字必須逐字一致,
+// 否則同一檔股票在兩邊會顯示不同狀態。
+// 乖離率門檻(8/15/25)沿用評分公式,是回測中唯一連「各股自比」都驗證方向正確的項目;
+// RSI門檻(70/80/85)為市場常用區間,尚未驗證,採保守設定
 function computeChaseStatus(bias, rsi) {
   if (bias == null && rsi == null) return '未知';
-  if ((bias != null && bias > 15) || (rsi != null && rsi > 80)) return '不建議';
+  const b = bias == null ? null : +bias;
+  const r = rsi == null ? null : +rsi;
+  if ((b != null && b > 25) || (b != null && b > 15 && r != null && r > 85)) return '風險極大';
+  if ((b != null && b > 15) || (r != null && r > 80)) return '不建議';
+  if ((b != null && b > 8) || (r != null && r > 70)) return '考慮';
   return '可追';
+}
+
+// 五級對應顏色:可追(紅,最佳)→考慮(黃)→不建議(橘)→風險極大(綠,最差),未知用灰。
+// 依台股紅漲綠跌,與主報表一致
+function chaseStatusColor(status) {
+  switch (status) {
+    case '可追': return COLORS.up;
+    case '考慮': return COLORS.yellow;
+    case '不建議': return COLORS.orange;
+    case '風險極大': return COLORS.down;
+    default: return COLORS.textMuted;
+  }
 }
 
 // ==================== 選股分 / 時機分 / 四象限(新評分,試行中) ====================
@@ -1721,6 +1862,8 @@ function StockAnalyzer() {
       supportResistanceInfo,
       lastPriceForExtra
     );
+    // 價格形態:用還原股價序列(與支撐壓力、乖離率同一個基準)
+    const pricePatterns = computePricePatterns(adjForExtra.highs, adjForExtra.lows, adjForExtra.closes, data.volumes);
     const quadrantInfo = computeQuadrantLabel(selectionScore, timingScore);
     if (quadrantInfo) { quadrantInfo.flowDays = localFlow20.days; }
     const volumeConcentrationInfo = computeVolumeConcentration(adjForExtra.closes, data.volumes, lastPriceForExtra);
@@ -1739,7 +1882,7 @@ function StockAnalyzer() {
       shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
       dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
-      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday, quadrantInfo,
+      supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday, quadrantInfo, pricePatterns,
     };
     setResult(fullResult);
     setUpdatedAt(new Date());
@@ -2210,8 +2353,8 @@ function StockAnalyzer() {
               sub={result.biasInfo ? result.biasInfo.warning : ''}
               color={result.biasInfo ? (result.biasInfo.bias > 8 ? COLORS.orange : (result.biasInfo.bias >= 0 ? COLORS.up : COLORS.down)) : undefined} />
             <StatBox label="可追狀態" value={computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi)}
-              sub="依乖離率/RSI判斷,非投資建議"
-              color={(() => { const s = computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi); return s === '可追' ? COLORS.up : s === '不建議' ? COLORS.down : COLORS.yellow; })()} />
+              sub="依乖離率/RSI分五級,非投資建議"
+              color={chaseStatusColor(computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi))} />
             <StatBox label="量比" value={result.volRatio ?? '—'}
               sub={result.volRatio >= 2 ? '成交量明顯放大' : (result.volTrend || '')}
               color={result.volRatio >= 2 ? COLORS.gold : undefined} />
@@ -2368,6 +2511,22 @@ function StockAnalyzer() {
               </span>
               ({result.relativeStrengthInfo.label})
             </InfoLine>
+          )}
+
+          {result.pricePatterns && result.pricePatterns.length > 0 && (
+            <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: `1px solid ${COLORS.blue}44` }}>
+              <div style={{ color: COLORS.blue, fontSize: 14, fontWeight: 700 }}>📐價格形態</div>
+              <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 5, lineHeight: 1.7 }}>
+                {result.pricePatterns.map((p) => (
+                  <div key={p.name}>
+                    疑似{p.name}:{p.broken ? `已突破 ${p.neck} 元` : `尚未突破 ${p.neck} 元`}
+                  </div>
+                ))}
+              </div>
+              <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 5, lineHeight: 1.5 }}>
+                ※形態要突破頸線後才算確認,形成中的形態有相當比例最後不成立。這是從日線高低點反推的客觀圖形描述,不是買賣訊號,也不具預測能力。
+              </div>
+            </div>
           )}
 
           {result.quadrantInfo && (
