@@ -1863,7 +1863,14 @@ function StockAnalyzer() {
       lastPriceForExtra
     );
     // 價格形態:用還原股價序列(與支撐壓力、乖離率同一個基準)
-    const pricePatterns = computePricePatterns(adjForExtra.highs, adjForExtra.lows, adjForExtra.closes, data.volumes);
+    // 形態辨識是選配功能,任何錯誤都只該讓「形態」這一項消失,不能讓整次查詢失敗。
+    // 主報表 2026/09/26 曾因形態函式拋錯而導致所有清單變空,這裡先做好隔離
+    let pricePatterns = [];
+    try {
+      pricePatterns = computePricePatterns(adjForExtra.highs, adjForExtra.lows, adjForExtra.closes, data.volumes);
+    } catch (e) {
+      console.warn('形態辨識失敗,已略過:', e);
+    }
     const quadrantInfo = computeQuadrantLabel(selectionScore, timingScore);
     if (quadrantInfo) { quadrantInfo.flowDays = localFlow20.days; }
     const volumeConcentrationInfo = computeVolumeConcentration(adjForExtra.closes, data.volumes, lastPriceForExtra);
