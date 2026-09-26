@@ -344,7 +344,7 @@ function computePricePatterns(highs, lows, closes, volumes) {
       const ps = Math.max(0, i1 - 25), pe = Math.max(1, i1 - 5);
       if (pe <= ps) continue;
       if (Math.max(...highs.slice(ps, pe)) < lo * 1.12) continue;
-      found.push({ name: '雙底', neck: +neck.toFixed(2), broken: last > neck });
+      found.push({ name: '雙底', dir: '偏多', neck: +neck.toFixed(2), broken: last > neck });
       break outer;
     }
   }
@@ -362,7 +362,10 @@ function computePricePatterns(highs, lows, closes, volumes) {
       if (eLo > 0 && lLo > 0) {
         const early = (eHi - eLo) / eLo, late = (lHi - lLo) / lLo;
         if (hL < hF * 0.985 && lL > lF * 1.015 && late <= early * 0.7) {
-          found.push({ name: '三角收斂', neck: +hL.toFixed(2), broken: last > hL });
+          // 三角收斂本身不帶方向:要等往哪一邊突破才知道。雙底、頭肩底是底部反轉,
+          // 旗形是上升中繼,那三種本身就偏多;三角沒突破就是「方向未定」
+          const triDir = last > hL ? '偏多' : (last < lL ? '偏空' : '方向未定');
+          found.push({ name: '三角收斂', dir: triDir, neck: +hL.toFixed(2), lower: +lL.toFixed(2), broken: last > hL || last < lL });
         }
       }
     }
@@ -383,7 +386,7 @@ function computePricePatterns(highs, lows, closes, volumes) {
     const since = n - 1 - ic;
     if (since > 25 || since < 3) continue;
     if (Math.min(...lows.slice(ic)) < pb) continue;
-    found.push({ name: '頭肩底', neck: +neck.toFixed(2), broken: last > neck });
+    found.push({ name: '頭肩底', dir: '偏多', neck: +neck.toFixed(2), broken: last > neck });
     break;
   }
 
@@ -402,7 +405,7 @@ function computePricePatterns(highs, lows, closes, volumes) {
         const avg = (arr) => arr.reduce((x, y) => x + y, 0) / arr.length;
         const v1 = avg(volumes.slice(st, en)), v2 = avg(volumes.slice(en));
         if (v1 <= 0 || v2 > v1 * 0.75) continue;
-        found.push({ name: '旗形', neck: +hi.toFixed(2), broken: last > hi });
+        found.push({ name: '旗形', dir: '偏多', neck: +hi.toFixed(2), broken: last > hi });
         break flagLoop;
       }
     }
@@ -2524,11 +2527,20 @@ function StockAnalyzer() {
             <div style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: `1px solid ${COLORS.blue}44` }}>
               <div style={{ color: COLORS.blue, fontSize: 14, fontWeight: 700 }}>📐價格形態</div>
               <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 5, lineHeight: 1.7 }}>
-                {result.pricePatterns.map((p) => (
-                  <div key={p.name}>
-                    疑似{p.name}:{p.broken ? `已突破 ${p.neck} 元` : `尚未突破 ${p.neck} 元`}
-                  </div>
-                ))}
+                {result.pricePatterns.map((p) => {
+                  const dir = p.dir || '方向未定';
+                  // 顏色依台股紅漲綠跌:偏多紅、偏空綠、方向未定黃
+                  const mark = dir === '偏多' ? '▲' : dir === '偏空' ? '▼' : '◆';
+                  const col = dir === '偏多' ? COLORS.up : dir === '偏空' ? COLORS.down : COLORS.yellow;
+                  const status = p.name === '三角收斂'
+                    ? (dir === '偏多' ? `向上突破 ${p.neck} 元` : dir === '偏空' ? `向下跌破 ${p.lower} 元` : `區間 ${p.lower}~${p.neck} 元,尚未突破任一邊`)
+                    : (p.broken ? `已突破頸線 ${p.neck} 元` : `尚未突破頸線 ${p.neck} 元`);
+                  return (
+                    <div key={p.name} style={{ color: col, fontWeight: 600 }}>
+                      {mark}疑似{p.name}({dir}):{status}
+                    </div>
+                  );
+                })}
               </div>
               <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 5, lineHeight: 1.5 }}>
                 ※形態要突破頸線後才算確認,形成中的形態有相當比例最後不成立。這是從日線高低點反推的客觀圖形描述,不是買賣訊號,也不具預測能力。
