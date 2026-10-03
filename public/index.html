@@ -19,7 +19,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// 網頁版版本:2026-10-03(新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
+// 網頁版版本:2026-10-03-b(選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
 // 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js)
 const { useState, useEffect, useCallback, useRef } = React;
 
@@ -531,7 +531,11 @@ function computeQuadrantLabel(sel, tim) {
   const incomplete = sel.used < 3 || tim.used < 3;
   const missingAll = [...(sel.missing || []), ...(tim.missing || [])];
   const incompleteText = incomplete ? (missingAll.length ? `(資料不完整:缺${missingAll.join('、')})` : '(資料不完整)') : '';
-  return { key, icon: style.icon, color: style.color, incomplete, incompleteText, selScore: sel.score, timScore: tim.score, selReasons: sel.reasons, timReasons: tim.reasons };
+  // 【2026-10-03】顯示用的10分制換算(與每日報表 2026-10-03-X 同步;四象限判斷邏輯不變):
+  // 選股分範圍 -4~+6 → 0~10;時機分範圍 -4~+3 → 0~10
+  const selScore10 = Math.round((sel.score + 4) / 10 * 10 * 10) / 10;
+  const timScore10 = Math.round((tim.score + 4) / 7 * 10 * 10) / 10;
+  return { key, icon: style.icon, color: style.color, incomplete, incompleteText, selScore: sel.score, timScore: tim.score, selScore10, timScore10, selReasons: sel.reasons, timReasons: tim.reasons };
 }
 
 // 法人20日累計(網頁版專用):本機記錄只在「查詢該股時」才記一筆,不像主報表每天都記。
@@ -2635,9 +2639,9 @@ function StockAnalyzer() {
                 {result.quadrantInfo.incomplete && <span style={{ color: COLORS.textMuted, fontSize: 12, fontWeight: 400 }}>{result.quadrantInfo.incompleteText || '(資料不完整)'}</span>}
               </div>
               <div style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 5, lineHeight: 1.6 }}>
-                選股分 {result.quadrantInfo.selScore}:{result.quadrantInfo.selReasons || '無明顯依據'}
+                選股分 {result.quadrantInfo.selScore}〔{result.quadrantInfo.selScore10}/10〕:{result.quadrantInfo.selReasons || '無明顯依據'}
                 <br />
-                時機分 {result.quadrantInfo.timScore}:{result.quadrantInfo.timReasons || '無明顯依據'}
+                時機分 {result.quadrantInfo.timScore}〔{result.quadrantInfo.timScore10}/10〕:{result.quadrantInfo.timReasons || '無明顯依據'}
               </div>
               {/* 兩種最常見的誤會,各自講清楚:
                   「優質・等拉回」容易被當成「可以買」——體質好不等於現在這個價位可以進場;
