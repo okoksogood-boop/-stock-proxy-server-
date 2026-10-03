@@ -19,7 +19,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// 網頁版版本:2026-10-02(與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
+// 網頁版版本:2026-10-03(新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
 // 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js)
 const { useState, useEffect, useCallback, useRef } = React;
 
@@ -564,6 +564,17 @@ function netDirColor(v) {
   if (!isFinite(n) || n === 0) return COLORS.textSecondary;
   return n > 0 ? COLORS.up : COLORS.down;
 }
+// 【2026-10-03】三大法人同步買超/賣超(與每日報表 Get-InstSyncDirection 同一套規則):
+// 外資、投信、自營商「當天」三家方向相同就算,不設張數門檻;以四捨五入後的張數判斷,
+// 任一家顯示「持平 0張」就不算。回傳 '買超'、'賣超' 或 null
+function instSyncDirection(flow) {
+  if (!flow) return null;
+  const lots = [flow.foreignNet, flow.trustNet, flow.dealerNet].map((v) => Math.round((+v || 0) / 1000));
+  if (lots.every((x) => x > 0)) return '買超';
+  if (lots.every((x) => x < 0)) return '賣超';
+  return null;
+}
+
 // 一筆三大法人買賣超(股數)顯示成「買超 123張」;0 顯示「持平 0張」
 function NetLots({ value }) {
   return <span style={{ color: netDirColor(value) }}>{netDirText(value)} {Math.abs(Math.round(value / 1000))}張</span>;
@@ -2496,6 +2507,15 @@ function StockAnalyzer() {
               {result.flow.source === '上櫃' && <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※上櫃股,資料來源:櫃買中心{result.flow.date ? `(${result.flow.date})` : ''}</span>}
             </InfoLine>
           )}
+
+          {result.flow && (() => {
+            const syncDir = instSyncDirection(result.flow);
+            if (!syncDir) return null;
+            const totalLots = Math.abs(Math.round(result.flow.totalNet / 1000));
+            return syncDir === '買超'
+              ? <InfoLine color={COLORS.up}>🔺三大法人同步買超:外資、投信、自營商當天都是買超(合計 {totalLots}張);只代表當天方向一致,不代表之後會延續</InfoLine>
+              : <InfoLine color={COLORS.down}>🔻三大法人同步賣超:外資、投信、自營商當天都是賣超(合計 {totalLots}張);三家同時調節,需留意</InfoLine>;
+          })()}
 
           {(result.foreignStreak?.days > 0 || result.trustStreak?.days > 0 || result.dealerStreak?.days > 0) && (
             <InfoLine label="連續買賣天數">
