@@ -19,7 +19,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// 網頁版版本:2026-10-03-b(選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
+// 網頁版版本:2026-10-04(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
 // 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js)
 const { useState, useEffect, useCallback, useRef } = React;
 
@@ -1001,7 +1001,7 @@ function computeTomorrowOutlook(ma5, ma20, kd, closes) {
   if (priceMomentum === '上升') score++; else if (priceMomentum === '下降') score--;
 
   const outlook = score >= 2 ? '偏多機率較高' : score <= -2 ? '偏空機率較高' : '方向不明,建議觀望';
-  return `明日推測:${outlook}(KD動能:${kMomentum},短期價格動能:${priceMomentum})※僅為技術指標簡單推算,非保證,僅供參考`;
+  return `下次推測:${outlook}(KD動能:${kMomentum},短期價格動能:${priceMomentum})※僅為技術指標簡單推算,非保證,僅供參考`;
 }
 
 // 還原股價:用「調整後收盤價/原始收盤價」的比例,同比例套用到當日High/Low,
@@ -2817,7 +2817,7 @@ function StockAnalyzer() {
             )}
             {!aiInsight && !insightLoading && (
               <div style={{ fontSize: 12, color: COLORS.textMuted }}>
-                {/* AI分析失敗時的備援:仍顯示規則式明日推測,確保這個欄位不會完全空白 */}
+                {/* AI分析失敗時的備援:仍顯示規則式下次推測,確保這個欄位不會完全空白 */}
                 {result.tomorrowOutlook ? (
                   <span style={{ color: result.tomorrowOutlook.includes('偏多') ? COLORS.up : result.tomorrowOutlook.includes('偏空') ? COLORS.down : COLORS.textSecondary }}>
                     {result.tomorrowOutlook}
