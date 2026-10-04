@@ -19,8 +19,10 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// 網頁版版本:2026-10-04(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
-// 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js)
+// 網頁版版本:2026-10-05(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
+// 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js;
+// 🆕2026-10-05:短中期訊號綜合判讀補上「考慮」與「風險極大」兩個分支,原本可追狀態五級化時漏同步,
+// 這兩級會錯誤落入fallback文字,風險極大的個股反而顯示過輕、顏色也對不上同頁的可追狀態徽章)
 const { useState, useEffect, useCallback, useRef } = React;
 
 const COLORS = {
@@ -607,7 +609,15 @@ function checkAIPriceLevelWording(text, price) {
 
 // 短中期訊號綜合判讀:把可追狀態(短線)、月線趨勢+相對強弱(中期)整合成一句話,
 // 與每日報表Get-ShortMidSyncLine邏輯一致,7種組合用符號+文字快速分辨嚴重程度
-function computeShortMidSyncLine(chaseStatus, monthlyTrend, rsLabel) {
+// 【2026-10-05修正】原本只認得'未知'/'可追'/'不建議'三種字串;可追狀態改五級化時新增的
+// '考慮'與'風險極大'沒有對應分支,兩者都會掉進最後那句寫死的「短線過熱,中期方向中性不明確,
+// 建議觀望」——對「考慮」是誤判成過熱,對「風險極大」反而講得太輕(不會出現⚠️⚠️/⚠️⚠️⚠️加重
+// 警示,也不會講出是乖離率還是RSI超標、超多少),而且不管中期實際方向是什麼都寫死「中性不明確」,
+// 常常自相矛盾(後面括號明明列出月線偏多卻說方向不明確)。這跟每日報表很久以前做可追狀態五級化
+// 時發生過的同一個耦合漏洞(技術教訓第128條)一樣,只是這次漏在網頁版沒跟著同步,這裡補上。
+// 新增bias/rsi兩個參數,只用來重建「風險極大」的觸發原因文字,邏輯對應每日報表
+// Get-ChaseStatusLabel內$script:LastChaseReason的兩條判斷式(乖離>25%,或乖離>15%且RSI>85)
+function computeShortMidSyncLine(chaseStatus, monthlyTrend, rsLabel, bias, rsi) {
   let midScore = 0;
   if (monthlyTrend === '月線偏多') midScore++;
   else if (monthlyTrend === '月線偏空') midScore--;
@@ -621,6 +631,20 @@ function computeShortMidSyncLine(chaseStatus, monthlyTrend, rsLabel) {
 
   if (chaseStatus === '未知') {
     return `短線資料不足無法判斷,僅供參考中期方向:${midLabel}`;
+  }
+  if (chaseStatus === '考慮') {
+    if (midLabel === '中期偏多') return `短線已稍微偏高但還不算過熱,中期趨勢仍偏多(${midDesc}),屬於可以觀察的位置`;
+    if (midLabel === '中期偏空') return `⚠️短線稍微偏高,且中期動能(${midDesc})已轉弱,上檔空間可能有限`;
+    return `短線稍微偏高,中期方向中性不明確(${midDesc}),僅供參考`;
+  }
+  if (chaseStatus === '風險極大') {
+    const b = bias == null ? null : +bias;
+    const r = rsi == null ? null : +rsi;
+    let why = '短線指標已嚴重偏離';
+    if (b != null && b > 25) why = `乖離率${bias}%已嚴重偏離月線`;
+    else if (b != null && b > 15 && r != null && r > 85) why = `乖離率${bias}%偏高且RSI=${rsi}嚴重超買,兩項同時極端`;
+    if (midLabel === '中期偏多') return `⚠️⚠️短線嚴重過熱(${why}),即使中期趨勢仍偏多(${midDesc}),此時進場的成本與回檔風險都明顯偏高`;
+    return `⚠️⚠️⚠️短線嚴重過熱(${why})且中期動能(${midDesc})不支持,這是風險最高的組合`;
   }
   if (chaseStatus === '可追' && midLabel === '中期偏多') {
     return '✅短中期同步偏多,短線正常、中期動能也支持,訊號方向一致';
@@ -2662,7 +2686,7 @@ function StockAnalyzer() {
 
           {(result.monthlyTrendInfo || result.relativeStrengthInfo) && (() => {
             const cs = computeChaseStatus(result.biasInfo ? result.biasInfo.bias : null, result.rsi);
-            const syncLine = computeShortMidSyncLine(cs, result.monthlyTrendInfo ? result.monthlyTrendInfo.trend : null, result.relativeStrengthInfo ? result.relativeStrengthInfo.label : null);
+            const syncLine = computeShortMidSyncLine(cs, result.monthlyTrendInfo ? result.monthlyTrendInfo.trend : null, result.relativeStrengthInfo ? result.relativeStrengthInfo.label : null, result.biasInfo ? result.biasInfo.bias : null, result.rsi);
             // 台股慣例紅漲綠跌:✅偏多用COLORS.up(紅)、⚠️⚠️偏空用COLORS.down(綠)。原本這裡兩個
             // 顏色寫反了,跟每日報表PowerShell版本原本的同一個bug一樣(已經在PS版修正過),這裡同步修正
             const syncColor = syncLine.startsWith('✅') ? COLORS.up : syncLine.startsWith('⚠️⚠️') ? COLORS.down : COLORS.yellow;
