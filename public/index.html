@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
@@ -22,7 +22,10 @@
 // 網頁版版本:2026-10-05(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
 // 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js;
 // 🆕2026-10-05:短中期訊號綜合判讀補上「考慮」與「風險極大」兩個分支,原本可追狀態五級化時漏同步,
-// 這兩級會錯誤落入fallback文字,風險極大的個股反而顯示過輕、顏色也對不上同頁的可追狀態徽章)
+// 這兩級會錯誤落入fallback文字,風險極大的個股反而顯示過輕、顏色也對不上同頁的可追狀態徽章
+// 🆕2026-10-07:與每日股票趨勢報表 2026-10-06-D 同步補齊外資專屬四項功能(先前兩邊分開實作、
+// 外資相關邏輯沒有同步更新,是本專案最常見的bug來源):(a)連續買賣超≥5日加⚠️提醒、
+// (b)選股分新增外資20日累計±2分權重、(c)外資轉向警示、(d)外資持股比例變化追蹤)
 const { useState, useEffect, useCallback, useRef } = React;
 
 const COLORS = {
@@ -453,8 +456,8 @@ function chaseStatusColor(status) {
 // 短線表現反而較差。這是用實際回測樣本拆解後的發現(各股自比,16檔中13檔均線翻多時進場反而較差)。
 // 【試行中】主報表正與舊評分並行觀察至少20個交易日,確認有效後才會正式採用,規則可能調整。
 
-// 選股分:用變化慢的訊號判斷股票本身的體質與趨勢(4項)
-function computeSelectionScore(yoy, relativeStrength, monthlyTrend, flow20d) {
+// 選股分:用變化慢的訊號判斷股票本身的體質與趨勢(5項,2026-10-07新增外資20日累計權重)
+function computeSelectionScore(yoy, relativeStrength, monthlyTrend, flow20d, foreignFlow20d) {
   let score = 0, used = 0; const reasons = [];
   if (yoy != null) {
     used++; const y = +(+yoy).toFixed(1);
@@ -478,13 +481,23 @@ function computeSelectionScore(yoy, relativeStrength, monthlyTrend, flow20d) {
     if (flow20d > 0) { score += 1; reasons.push('法人20日累計買超(+1)'); }
     else if (flow20d < 0) { score -= 1; reasons.push('法人20日累計賣超(-1)'); }
   }
+  // 【2026-10-07,外資權重加重】外資對個股影響重大,在上面「三大法人合計」(±1分)之外,
+  // 「額外」針對外資20日累計方向再給±2分——不是取代原本的合計訊號,是疊加:外資同時計入
+  // 合計的那一分,也計入這裡自己的兩分,讓外資的份量比投信、自營商明顯更重。
+  // (與每日股票趨勢報表 Get-SelectionScore 2026-10-06-A 版同步,門檻與正負號完全一致)
+  if (foreignFlow20d != null) {
+    used++;
+    if (foreignFlow20d > 0) { score += 2; reasons.push('外資20日累計買超(+2)'); }
+    else if (foreignFlow20d < 0) { score -= 2; reasons.push('外資20日累計賣超(-2)'); }
+  }
   // 【2026-10-02】記錄缺哪幾項,「資料不完整」時寫出來(與每日報表 2026-09-30-P 同步)
   const missing = [];
   if (yoy == null) missing.push('營收年增');
   if (!(relativeStrength && relativeStrength.rs != null)) missing.push('相對強弱');
   if (!(monthlyTrend && monthlyTrend.trend)) missing.push('月線趨勢');
   if (flow20d == null) missing.push('法人20日累計');
-  return { score, reasons: reasons.join('、'), used, total: 4, missing };
+  if (foreignFlow20d == null) missing.push('外資20日累計');
+  return { score, reasons: reasons.join('、'), used, total: 5, missing };
 }
 
 // 時機分:核心概念是「強勢股拉回了多少」,而不是「漲得多強」(4項)
@@ -535,7 +548,10 @@ function computeQuadrantLabel(sel, tim) {
   const incompleteText = incomplete ? (missingAll.length ? `(資料不完整:缺${missingAll.join('、')})` : '(資料不完整)') : '';
   // 【2026-10-03】顯示用的10分制換算(與每日報表 2026-10-03-X 同步;四象限判斷邏輯不變):
   // 選股分範圍 -4~+6 → 0~10;時機分範圍 -4~+3 → 0~10
-  const selScore10 = Math.round((sel.score + 4) / 10 * 10 * 10) / 10;
+  // 【2026-10-07】選股分加入外資20日累計(±2分)後,可能範圍變成 -6~+8(寬度14,偏移6),
+  // 10分制換算公式同步調整,否則同一個原始分數換算出來的10分制數字會跟著錄錯
+  // (與每日報表 Get-QuadrantLabel 2026-10-06-A 版同步,incomplete門檻Used<3維持不變)
+  const selScore10 = Math.round((sel.score + 6) / 14 * 10 * 10) / 10;
   const timScore10 = Math.round((tim.score + 4) / 7 * 10 * 10) / 10;
   return { key, icon: style.icon, color: style.color, incomplete, incompleteText, selScore: sel.score, timScore: tim.score, selScore10, timScore10, selReasons: sel.reasons, timReasons: tim.reasons };
 }
@@ -554,6 +570,23 @@ function computeLocalFlow20d(code) {
     const days = new Set(recs.map((r) => r.date)).size;
     if (days < 15) return { value: null, days };
     const sum = recs.slice(0, 20).reduce((acc, r) => acc + (+r.totalNet || 0), 0);
+    return { value: sum, days };
+  } catch (e) { return { value: null, days: 0 }; }
+}
+
+// 外資20日累計(網頁版專用,2026-10-07新增,與每日報表外資權重加重同步):跟上面
+// computeLocalFlow20d同一套15天門檻與28天視窗邏輯,只是只累加外資(foreignNet)這一欄,
+// 不混入投信、自營商,讓選股分能單獨看外資20日累計方向
+function computeLocalForeignFlow20d(code) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const cutoff = new Date(Date.now() - 28 * 86400000);
+    const cutoffStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei' }).format(cutoff);
+    const recs = all.filter((r) => r.code === code && r.date >= cutoffStr && r.foreignNet != null)
+      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    const days = new Set(recs.map((r) => r.date)).size;
+    if (days < 15) return { value: null, days };
+    const sum = recs.slice(0, 20).reduce((acc, r) => acc + (+r.foreignNet || 0), 0);
     return { value: sum, days };
   } catch (e) { return { value: null, days: 0 }; }
 }
@@ -1180,6 +1213,18 @@ async function fetchInstitutional(code) {
   }
 }
 
+// 外資及陸資持股比例(2026-10-07新增,對應server.js新增的/api/foreign-holding路由)
+async function fetchForeignHolding(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/foreign-holding/${code}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.holding;
+  } catch (e) {
+    return null;
+  }
+}
+
 function getTaipeiDateStr() {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei' }).format(new Date());
 }
@@ -1284,6 +1329,81 @@ function getConsecutiveDays(code, field) {
       else break;
     }
     return { days: count, direction };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 外資轉向警示(2026-10-07新增,與每日報表 Get-ForeignFlowReversal 同步):跟上面
+// getConsecutiveDays不同,那個只回報「今天」這一段連續了幾天,本身看不出「是不是剛剛才轉向」。
+// 這裡額外比對「今天的方向」跟「今天之前那一段的方向」,只有兩者不同、且前一段至少連續2天
+// 以上(避免把單日雜訊也當成轉向)才回報,否則回傳null。資料來源同樣是tw_stock_flow_history
+// 裡的foreignNet欄位,不需要新的歷史記錄機制
+function getForeignFlowReversal(code) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_flow_history') || '[]');
+    const rows = all.filter((r) => r.code === code && r.foreignNet != null).sort((a, b) => b.date.localeCompare(a.date));
+    if (rows.length < 2) return null;   // 不足2天,無法判斷「之前」是哪個方向
+
+    const todayVal = +rows[0].foreignNet;
+    if (!todayVal) return null;   // 今天持平,談不上轉向
+    const todayDir = todayVal > 0 ? '買超' : '賣超';
+
+    const priorVal = +rows[1].foreignNet;
+    if (!priorVal) return null;   // 前一段起點是持平,方向不明確,不判斷
+    const priorDir = priorVal > 0 ? '買超' : '賣超';
+    if (todayDir === priorDir) return null;   // 方向沒變,不是轉向
+
+    // 往回算前一段(轉向前)連續了幾天、累計多少張
+    let priorCount = 0, priorCumulative = 0;
+    for (let i = 1; i < rows.length; i++) {
+      const v = +rows[i].foreignNet;
+      if ((priorDir === '買超' && v > 0) || (priorDir === '賣超' && v < 0)) { priorCount++; priorCumulative += v; }
+      else break;
+    }
+    if (priorCount < 2) return null;   // 前一段不到2天,可能只是雜訊,不算轉向
+
+    return {
+      todayDirection: todayDir, todayAmount: Math.round(todayVal / 1000),
+      priorDirection: priorDir, priorDays: priorCount, priorAmount: Math.round(priorCumulative / 1000),
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 外資持股比例歷史記錄(2026-10-07新增,網頁版用localStorage取代每日報表的ForeignHoldingHistory.csv):
+// 每日更新的資料,同一個台北日曆日只記一筆,跟tw_stock_flow_history分開存,因為持股比例不是
+// 查一次股票就有新值(每日僅更新一次),用同一把key容易互相干擾
+function recordForeignHoldingHistory(code, holding) {
+  if (!holding || holding.pct == null) return;
+  try {
+    const key = 'tw_stock_foreign_holding_history';
+    const all = JSON.parse(localStorage.getItem(key) || '[]');
+    const todayStr = getTaipeiDateStr();
+    if (all.some((r) => r.code === code && r.date === todayStr)) return;
+    all.push({ date: todayStr, code, pct: +holding.pct });
+    // 只保留最近30筆同一檔股票的記錄(每日僅1筆,30筆已遠超過需要的「比對最近兩次」用途)
+    const trimmed = all.filter((r) => r.code !== code).concat(
+      all.filter((r) => r.code === code).slice(-30)
+    );
+    localStorage.setItem(key, JSON.stringify(trimmed));
+  } catch (e) { /* ignore */ }
+}
+
+// 比對最近兩個「有記錄的日期」,算出外資持股比例變化了多少百分點(正=比例上升、負=下降);
+// 記錄不足2天時回傳null(與每日報表 Get-ForeignHoldingChange 同步)
+function getForeignHoldingChange(code) {
+  try {
+    const all = JSON.parse(localStorage.getItem('tw_stock_foreign_holding_history') || '[]');
+    const rows = all.filter((r) => r.code === code).sort((a, b) => b.date.localeCompare(a.date));
+    if (rows.length < 2) return null;
+    const cur = rows[0], prev = rows[1];
+    return {
+      currentPct: cur.pct, previousPct: prev.pct,
+      changeAmount: Math.round((cur.pct - prev.pct) * 1000) / 1000,
+      date: cur.date, previousDate: prev.date,
+    };
   } catch (e) {
     return null;
   }
@@ -1928,9 +2048,9 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData, intraday] = await Promise.all([
+    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData, intraday, foreignHolding] = await Promise.all([
       fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(),
-      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'), fetchIntraday(cleaned),
+      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'), fetchIntraday(cleaned), fetchForeignHolding(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
@@ -1941,6 +2061,10 @@ function StockAnalyzer() {
     const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
     const trustStreak = getConsecutiveDays(cleaned, 'trustNet');
     const dealerStreak = getConsecutiveDays(cleaned, 'dealerNet');
+    // 【2026-10-07新增,外資專屬追蹤(c)(d)】外資轉向警示與持股比例變化,與每日報表同步
+    const foreignReversal = getForeignFlowReversal(cleaned);
+    recordForeignHoldingHistory(cleaned, foreignHolding);
+    const foreignHoldingChange = getForeignHoldingChange(cleaned);
 
     const analysis = analyze(data.closes, data.highs, data.lows, data.volumes, data.adjCloses, data.opens, data.code, data.liveQuote);
     // 相對強弱RS(需要大盤TWII同期收盤價當基準,月線趨勢已內建在analyze()裡)
@@ -1953,7 +2077,9 @@ function StockAnalyzer() {
     // 四象限新評分(試行中)。注意:距支撐要用「還原股價」的現價,因為支撐關卡本身就是用
     // 還原股價算出來的;若混用畫面上的原始現價,最近除息過的股票會算出錯誤的距離
     const localFlow20 = computeLocalFlow20d(cleaned);
-    const selectionScore = computeSelectionScore(revenue ? revenue.yoy : null, relativeStrengthInfo, analysis.monthlyTrendInfo, localFlow20.value);
+    // 【2026-10-07新增,外資專屬追蹤(b)】外資權重加重:選股分額外納入外資20日累計方向,與每日報表同步
+    const localForeignFlow20 = computeLocalForeignFlow20d(cleaned);
+    const selectionScore = computeSelectionScore(revenue ? revenue.yoy : null, relativeStrengthInfo, analysis.monthlyTrendInfo, localFlow20.value, localForeignFlow20.value);
     const timingScore = computeTimingScore(
       analysis.biasInfo ? analysis.biasInfo.bias : null,
       analysis.rsi,
@@ -1989,6 +2115,7 @@ function StockAnalyzer() {
       dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
       supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday, quadrantInfo, pricePatterns,
+      foreignReversal, foreignHolding, foreignHoldingChange,
     };
     setResult(fullResult);
     setUpdatedAt(new Date());
@@ -2021,6 +2148,10 @@ function StockAnalyzer() {
       contextParts.push(`毛利率${profitability.grossMargin}%、營益率${profitability.operatingMargin}%${epsText}`);
     }
     if (flow) contextParts.push(`三大法人今日:外資${netDirText(flow.foreignNet)}、投信${netDirText(flow.trustNet)}、自營商${netDirText(flow.dealerNet)}`);
+    // 【2026-10-07新增,外資專屬追蹤(c)(d)】外資持股比例、外資轉向警示一併餵給AI判斷,
+    // 與每日報表AI情境餵入邏輯同步(main.ps1 8053-8059行)
+    if (fullResult.foreignHolding) contextParts.push(`外資持股比例:${fullResult.foreignHolding.pct}%(${fullResult.foreignHolding.market},每日更新)`);
+    if (fullResult.foreignReversal) contextParts.push(`外資轉向:原連${fullResult.foreignReversal.priorDays}日${fullResult.foreignReversal.priorDirection}轉為${fullResult.foreignReversal.todayDirection}`);
     if (fullResult.shortMarginRatio != null) contextParts.push(`券資比${fullResult.shortMarginRatio}%`);
     if (fullResult.bigHolder && fullResult.bigHolder.pct != null) contextParts.push(`千張大戶持股比例${fullResult.bigHolder.pct}%`);
     if (fullResult.balanceSheet && fullResult.balanceSheet.roe != null) contextParts.push(`ROE(單季未年化)${fullResult.balanceSheet.roe}%`);
@@ -2062,10 +2193,13 @@ function StockAnalyzer() {
     if (result.stopLoss) parts.push(`建議停損價=${result.stopLoss.price}(依據:${result.stopLoss.basis})`);
     if (result.flow) parts.push(`三大法人今日:外資${netDirText(result.flow.foreignNet)}、投信${netDirText(result.flow.trustNet)}、自營商${netDirText(result.flow.dealerNet)}`);
     const streakParts = [];
-    if (result.foreignStreak?.days > 1) streakParts.push(`外資連${result.foreignStreak.days}日${result.foreignStreak.direction}`);
+    if (result.foreignStreak?.days > 1) streakParts.push(`外資連${result.foreignStreak.days}日${result.foreignStreak.direction}${result.foreignStreak.days >= 5 ? '⚠️' : ''}`);
     if (result.trustStreak?.days > 1) streakParts.push(`投信連${result.trustStreak.days}日${result.trustStreak.direction}`);
     if (result.dealerStreak?.days > 1) streakParts.push(`自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}`);
     if (streakParts.length > 0) parts.push(`連續買賣天數:${streakParts.join('、')}`);
+    // 【2026-10-07新增,外資專屬追蹤(c)(d)】與每日報表同步
+    if (result.foreignHolding) parts.push(`外資持股比例:${result.foreignHolding.pct}%(${result.foreignHolding.market})`);
+    if (result.foreignReversal) parts.push(`外資轉向警示:原連${result.foreignReversal.priorDays}日${result.foreignReversal.priorDirection}轉為${result.foreignReversal.todayDirection}`);
     if (result.marginChange != null) parts.push(`散戶融資:${result.marginChange > 0 ? '增加' : result.marginChange < 0 ? '減少' : '持平'}`);
     if (result.shortMarginRatio != null) parts.push(`券資比${result.shortMarginRatio}%`);
     if (result.bigHolder && result.bigHolder.pct != null) parts.push(`千張大戶持股比例${result.bigHolder.pct}%`);
@@ -2548,11 +2682,33 @@ function StockAnalyzer() {
           {(result.foreignStreak?.days > 0 || result.trustStreak?.days > 0 || result.dealerStreak?.days > 0) && (
             <InfoLine label="連續買賣天數">
               {[
-                result.foreignStreak?.days > 0 ? `外資連${result.foreignStreak.days}日${result.foreignStreak.direction}` : null,
+                // 【2026-10-07新增,外資專屬追蹤(a)簡化版】外資連續5日以上加⚠️醒目提醒,
+                // 與每日報表外資連續買賣超排行同一句提醒文字(僅加標記,不另外做批次排行看板)
+                result.foreignStreak?.days > 0 ? `外資連${result.foreignStreak.days}日${result.foreignStreak.direction}${result.foreignStreak.days >= 5 ? ' ⚠️連續5日以上特別留意' : ''}` : null,
                 result.trustStreak?.days > 0 ? `投信連${result.trustStreak.days}日${result.trustStreak.direction}` : null,
                 result.dealerStreak?.days > 0 ? `自營商連${result.dealerStreak.days}日${result.dealerStreak.direction}` : null,
               ].filter(Boolean).join('、')}
               <span style={{ fontSize: 11, color: COLORS.textMuted }}> ※依本機累積記錄計算,剛開始使用天數會較少</span>
+            </InfoLine>
+          )}
+
+          {result.foreignReversal && (
+            <InfoLine color={COLORS.yellow}>
+              🔄外資轉向警示:外資原本連續{result.foreignReversal.priorDays}日{result.foreignReversal.priorDirection}
+              (累計{Math.abs(result.foreignReversal.priorAmount)}張),上次轉為{result.foreignReversal.todayDirection} {Math.abs(result.foreignReversal.todayAmount)}張,
+              留意是否出現方向轉變;僅轉向第1天,建議觀察後續是否延續
+            </InfoLine>
+          )}
+
+          {result.foreignHolding && (
+            <InfoLine label="外資持股比例">
+              {result.foreignHolding.pct}%
+              {result.foreignHoldingChange && result.foreignHoldingChange.changeAmount !== 0 && (
+                <span style={{ color: result.foreignHoldingChange.changeAmount > 0 ? COLORS.up : COLORS.down }}>
+                  {' '}(較上次 {result.foreignHoldingChange.changeAmount > 0 ? '+' : ''}{result.foreignHoldingChange.changeAmount} 百分點)
+                </span>
+              )}
+              <span style={{ fontSize: 11, color: COLORS.textMuted }}> ({result.foreignHolding.market},每日更新{!result.foreignHoldingChange ? ';需累積至少2個交易日才能算出變化' : ''})</span>
             </InfoLine>
           )}
 
