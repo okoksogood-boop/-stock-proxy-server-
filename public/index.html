@@ -19,7 +19,8 @@
 <div id="root"></div>
 
 <script type="text/babel">
-// 網頁版版本:2026-10-05(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
+// 網頁版版本:2026-10-29(新增「⚡當沖參考」:能否當沖、依波動度的認賠價、成交值是否適合、波幅、來回成本、當沖比率、漲跌停提醒,與每日股票趨勢報表 2026-10-29-E 同一套邏輯;修正當沖成交值排名讀錯欄位名稱而從未顯示的問題)
+// 前一版:2026-10-05(「明日推測」改稱「下次推測」,與每日報表一致;選股分/時機分加上10分制換算;新增三大法人同步買超/賣超提醒;與每日股票趨勢報表 2026-09-30-T 同步:上櫃籌碼、借券與融資融券單位、買賣超0顯示持平、
 // 資料不完整寫出缺項、短中期訊號不再顯示(—/—)、AI用詞自檢;AI設定與JSON修補在 server.js;
 // 🆕2026-10-05:短中期訊號綜合判讀補上「考慮」與「風險極大」兩個分支,原本可追狀態五級化時漏同步,
 // 這兩級會錯誤落入fallback文字,風險極大的個股反而顯示過輕、顏色也對不上同頁的可追狀態徽章
@@ -1024,7 +1025,8 @@ function computeDayTradeInfo(code, snapshot, dispositionInfo) {
   }
   if (!snapshot || !Array.isArray(snapshot)) return null;
   const ranked = snapshot
-    .map((row) => ({ code: row['證券代號'], tradeValue: parseFloat(row['成交金額']) || 0 }))
+    // 【2026-10-29修正】證交所 OpenAPI 回傳的是英文欄位(Code、TradeValue),原本讀中文欄位名稱永遠對不到,這一行從來沒顯示過
+    .map((row) => ({ code: row.Code || row['證券代號'], tradeValue: parseFloat(String(row.TradeValue || row['成交金額'] || '0').replace(/,/g, '')) || 0 }))
     .filter((r) => r.tradeValue > 0)
     .sort((a, b) => b.tradeValue - a.tradeValue);
   const idx = ranked.findIndex((r) => r.code === code);
@@ -1033,6 +1035,79 @@ function computeDayTradeInfo(code, snapshot, dispositionInfo) {
   if (rank <= 20) return { text: `當沖成交值排名:全市場第${rank}名`, rank };
   const tradeValue = ranked[idx].tradeValue;
   return { text: `當沖成交值:${(tradeValue / 100000000).toFixed(2)}億元`, tradeValue };
+}
+
+// 【2026-10-29】⚡當沖參考:與每日股票趨勢報表 2026-10-29-E 的 Get-DayTradeAdviceText 同一套邏輯
+//   能否當沖:處置股→不能;證交所當沖標的清單(TWTB4U)有這檔→可以(暫停先賣後買註記→只能先買後賣);上市不在清單→可能不是;上櫃→以券商為準
+//   認賠價:「最近一日最低價」與「現價−0.5倍ATR(14)」取較接近現價者;開盤跳空改用「進場價−0.5倍ATR」
+//   成交值:≥5億適合、1~5億普通(小量進出)、<1億不適合;波幅ATR/股價 <1.5%小、1.5~5%適中、>5%大;當沖比率≥50%偏高
+function computeDayTradeAdvice({ code, market, price, closes, highs, lows, volumes, snapshot, disposition, dt }) {
+  if (!price || !closes || closes.length < 2) return null;
+  const items = [];
+  let verdictBad = false;
+  const isOtc = market === '上櫃';
+  // 1. 能不能當沖
+  if (disposition) { items.push('🚫不能當沖(處置股期間)'); verdictBad = true; }
+  else if (isOtc) items.push('上櫃股,官方當沖資料未取得,能否當沖以券商為準');
+  else if (!dt || !dt.available) items.push('能否當沖:官方資料本次未取得,以券商為準');
+  else if (dt.listed) items.push(dt.suspended ? '可當沖,但暫停先賣後買(只能先買後賣)' : `可當沖(證交所當沖標的,資料日 ${dt.date})`);
+  else items.push('⚠️不在證交所當沖成交清單,可能不是當沖標的,以券商為準');
+  // 2. 認賠價
+  const atr = computeATR(closes, highs, lows, 14);
+  const low = lows[lows.length - 1];
+  const cands = [];
+  if (low != null && low < price) cands.push({ v: low, b: '最近一日最低價' });
+  if (atr && price - 0.5 * atr > 0) cands.push({ v: +(price - 0.5 * atr).toFixed(2), b: '現價−0.5倍ATR' });
+  if (cands.length) {
+    cands.sort((a, b) => b.v - a.v);
+    const s = cands[0];
+    const pct = +((s.v / price - 1) * 100).toFixed(2);
+    items.push(`認賠參考:以現價 ${price} 元附近進場,跌破 ${s.v} 元(約 ${pct}%)認賠[依據:${s.b}]${atr ? `;開盤跳空時請改用「進場價−${(0.5 * atr).toFixed(2)}元」` : ''}`);
+  } else items.push('認賠參考:資料不足,無法計算');
+  // 3. 成交值(上市用證交所收盤總表;上櫃用 Yahoo 最近一日成交量×現價估算)
+  let tradeValue = null, tradeVolume = null, valueNote = '';
+  const row = Array.isArray(snapshot) ? snapshot.find((r) => (r.Code || r['證券代號']) === code) : null;
+  if (row) {
+    tradeValue = parseFloat(String(row.TradeValue || row['成交金額'] || '0').replace(/,/g, '')) || null;
+    tradeVolume = parseFloat(String(row.TradeVolume || row['成交股數'] || '0').replace(/,/g, '')) || null;
+  } else if (volumes && volumes.length) {
+    const v = volumes[volumes.length - 1];
+    if (v) { tradeValue = v * price; valueNote = '(以Yahoo成交量估算)'; }
+  }
+  if (tradeValue) {
+    const yi = +(tradeValue / 100000000).toFixed(2);
+    const lvl = yi >= 5 ? '適合當沖' : yi >= 1 ? '普通,只適合小量進出' : '不適合當沖,容易買得進賣不出、滑價';
+    if (yi < 1) verdictBad = true;
+    items.push(`成交值 ${yi} 億元${valueNote}→${lvl}`);
+    if (!isOtc && dt && dt.available && dt.listed && dt.shares && tradeVolume) {
+      const ratio = +((dt.shares / tradeVolume) * 100).toFixed(1);
+      if (ratio > 0 && ratio <= 100) items.push(`當沖比率 ${ratio}%${ratio >= 50 ? '(偏高,短線籌碼多、震盪大)' : ''}`);
+    }
+  } else items.push('成交值:資料未取得');
+  // 4. 波動
+  if (atr) {
+    const ap = +((atr / price) * 100).toFixed(2);
+    items.push(`平均每日波幅約 ${atr.toFixed(2)} 元(${ap}%)→${ap < 1.5 ? '波動小,扣掉成本後獲利空間有限' : ap <= 5 ? '波動適中' : '波動大,認賠要果斷、資金要減量'}`);
+  }
+  // 5. 成本與漲跌停
+  items.push(`來回成本約 ${computeTradingCost().dayTrade}%(未打折)`);
+  const prev = closes[closes.length - 2];
+  if (prev) {
+    const chg = (closes[closes.length - 1] / prev - 1) * 100;
+    if (chg >= 9.5) items.push('最近一日漲停,隔天開盤價差可能很大,不追高');
+    else if (chg <= -9.5) items.push('最近一日跌停,隔天容易大幅跳空,避免搶反彈');
+  }
+  return { items, verdictBad };
+}
+
+async function fetchDayTrade(code) {
+  try {
+    const res = await fetch(`${PROXY_BASE}/api/daytrade/${code}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;
+  }
 }
 
 function computeTomorrowOutlook(ma5, ma20, kd, closes) {
@@ -2048,14 +2123,20 @@ function StockAnalyzer() {
     }
     setLoading(true); setError(null); setResult(null);
 
-    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData, intraday, foreignHolding] = await Promise.all([
+    const [data, marginData, dividend, disposition, flow, announcements, revenue, profitability, twseSnapshot, bigHolder, lending, balanceSheet, dividendHistory, macro, benchmarkData, intraday, foreignHolding, dayTradeOfficial] = await Promise.all([
       fetchStock(cleaned), fetchMargin(cleaned), fetchDividend(cleaned), fetchDisposition(cleaned), fetchInstitutional(cleaned), fetchAnnouncements(cleaned), fetchRevenue(cleaned), fetchProfitability(cleaned), fetchTwseSnapshot(),
-      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'), fetchIntraday(cleaned), fetchForeignHolding(cleaned),
+      fetchBigHolder(cleaned), fetchLending(cleaned), fetchBalanceSheet(cleaned), fetchDividendHistory(cleaned), fetchMacro(), fetchStock('TWII'), fetchIntraday(cleaned), fetchForeignHolding(cleaned), fetchDayTrade(cleaned),
     ]);
     setLoading(false);
     if (!data) { setError(`查無「${trimmedInput}」的資料,請確認代號或名稱是否正確(中文名稱搜尋目前僅涵蓋上市股票)`); return; }
 
     const dayTradeInfo = computeDayTradeInfo(data.code, twseSnapshot, disposition);
+    // 【2026-10-29】⚡當沖參考(任何錯誤只讓這一塊消失,不影響整次查詢)
+    let dayTradeAdvice = null;
+    try {
+      const dtPrice = data.liveQuote != null ? data.liveQuote : data.closes[data.closes.length - 1];
+      dayTradeAdvice = computeDayTradeAdvice({ code: data.code, market: data.market, price: dtPrice, closes: data.closes, highs: data.highs, lows: data.lows, volumes: data.volumes, snapshot: twseSnapshot, disposition, dt: dayTradeOfficial });
+    } catch (e) { console.warn('當沖參考計算失敗,已略過:', e); }
 
     recordFlowHistory(cleaned, flow, data.timestamps);
     const foreignStreak = getConsecutiveDays(cleaned, 'foreignNet');
@@ -2112,7 +2193,7 @@ function StockAnalyzer() {
       shortChange: marginData ? marginData.shortChange : null,
       shortBalance: marginData ? marginData.shortBalance : null,
       shortMarginRatio: marginData ? marginData.shortMarginRatio : null,
-      dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo,
+      dividend, disposition, flow, foreignStreak, trustStreak, dealerStreak, announcements, revenue, profitability, news, dayTradeInfo, dayTradeAdvice,
       bigHolder, lending, balanceSheet, dividendHistory, macro, relativeStrengthInfo,
       supportResistanceInfo, volumeConcentrationInfo, priceMilestoneInfo, intraday, quadrantInfo, pricePatterns,
       foreignReversal, foreignHolding, foreignHoldingChange,
@@ -2573,6 +2654,16 @@ function StockAnalyzer() {
           {result.dayTradeInfo && (
             <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: result.dayTradeInfo.isDisposition ? 'rgba(255,92,92,0.1)' : 'rgba(240,215,137,0.1)', border: `1px solid ${result.dayTradeInfo.isDisposition ? 'rgba(255,92,92,0.35)' : 'rgba(240,215,137,0.35)'}`, color: result.dayTradeInfo.isDisposition ? COLORS.down : COLORS.gold, fontSize: 13, fontWeight: 600, textAlign: 'center' }}>
               {result.dayTradeInfo.text}
+            </div>
+          )}
+
+          {result.dayTradeAdvice && (
+            <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: result.dayTradeAdvice.verdictBad ? 'rgba(255,92,92,0.08)' : 'rgba(77,166,255,0.08)', border: `1px solid ${result.dayTradeAdvice.verdictBad ? 'rgba(255,92,92,0.35)' : 'rgba(77,166,255,0.35)'}`, fontSize: 13, lineHeight: 1.6 }}>
+              <div style={{ fontWeight: 700, color: COLORS.gold, marginBottom: 4 }}>⚡當沖參考</div>
+              {result.dayTradeAdvice.items.map((t, i) => (
+                <div key={i} style={{ color: /🚫|⚠️|不適合|跌停|漲停|偏高|波動大/.test(t) ? COLORS.orange : COLORS.textSecondary }}>・{t}</div>
+              ))}
+              <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 4 }}>當沖風險高,以上為程式依價量計算的參考,非投資建議;實際能否當沖以券商為準</div>
             </div>
           )}
 
