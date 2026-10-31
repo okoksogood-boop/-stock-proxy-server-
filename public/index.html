@@ -1651,6 +1651,69 @@ async function fetchInsight(context) {
 }
 
 // 比對AI文字分析語氣與量化技術面結論是否一致,不一致時提醒
+// ================= 【2026-10-31】AI分析語氣上色(與每日報表 SI分析同一套規則) =================
+// 警語=橘、偏多/可追/好=紅、偏空/不建議/不好=綠、資料提醒=灰;同一句好壞都有時只把關鍵字上色。
+// AI 依提示詞在每一句開頭放方向符號(🔴▲/🟢▼/⚠️/⚪—),有符號就照符號,沒有才用關鍵字判斷
+const TONE_PAT = {
+  info: /沒有更新|未更新|近似值|資料取得失敗|取得失敗|未取得|資料不完整|非精確|資料不足/,
+  warn: /⚠|🚨|警示|警告|警語|風險極大|嚴防|小心|處置|列注意|注意股|避免搶|請勿|不要採信|過熱/,
+  good: /可追(?!狀態)|偏多|利多|轉強|轉多|站上|優質(?!・等拉回)|可進場|黃金交叉|黃金排列|多頭排列|止穩|突破|樂觀|多方|強於大盤/g,
+  bad: /不建議|不可追|暫不追|偏空|利空|轉弱|轉空|跌破|暫不考慮|避開|不宜|不可當沖|空方|弱於大盤|空頭|死亡交叉|死亡排列|破底|跌停|新低|悲觀/g,
+};
+function getAiTone(text) {
+  let t = String(text || '').trim();
+  if (!t) return '';
+  if (/^(⚠|🚨)/.test(t)) return 'warn';
+  if (/^(🔴|▲|🔺)/.test(t)) return 'good';
+  if (/^(🟢|▼|🔻)/.test(t)) return 'bad';
+  if (/^(⚪|❔)/.test(t)) return '';
+  const s = t.replace(/可追狀態/g, '').replace(/(?:若下次收盤價)?(?:站上|跌破)\s*[\d,.]+\s*元,?(?:將觸發|有機會轉為)(?:黃金|死亡)交叉/g, '');
+  if (TONE_PAT.warn.test(s)) return 'warn';
+  const g = new RegExp(TONE_PAT.good.source).test(s.replace(/不可追/g, '')), b = new RegExp(TONE_PAT.bad.source).test(s);
+  if (g && b) return 'mixed';
+  if (g) return 'good';
+  if (b) return 'bad';
+  if (TONE_PAT.info.test(s)) return 'info';
+  return '';
+}
+function toneColor(tone) {
+  return { warn: COLORS.orange, good: COLORS.up, bad: COLORS.down, info: COLORS.textMuted }[tone] || COLORS.textPrimary;
+}
+// 好壞都有的句子:只把好壞關鍵字上色,其餘維持原色(回傳 React 片段陣列)
+function highlightToneWords(text) {
+  const re = new RegExp(`(${TONE_PAT.good.source})|(${TONE_PAT.bad.source})`, 'g');
+  const out = []; let last = 0; let m; let k = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0] === '') { re.lastIndex++; continue; }
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(<span key={k++} style={{ color: m[1] ? COLORS.up : COLORS.down, fontWeight: 700 }}>{m[0]}</span>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+// 把 AI 分析切成一句一句:新格式用「｜」分隔;舊格式(沒有「｜」)維持原本依「▲」切段
+function splitAiAnalysis(analysis) {
+  const a = String(analysis || '');
+  if (/[｜|]/.test(a)) return a.split(/[｜|]/).map(s => s.trim()).filter(Boolean);
+  if (/🔴▲|🟢▼|⚠️|⚪—/.test(a)) return a.split(/(?=🔴▲|🟢▼|⚠️|⚪—)/).map(s => s.trim()).filter(Boolean);
+  return a.split('▲').map(s => s.trim()).filter(Boolean);
+}
+function AiToneSegments({ analysis }) {
+  return (
+    <>
+      {splitAiAnalysis(analysis).map((seg, i) => {
+        const tone = getAiTone(seg);
+        return (
+          <div key={i} style={{ marginBottom: 6, color: tone === 'mixed' ? COLORS.textPrimary : toneColor(tone) }}>
+            {tone === 'mixed' ? highlightToneWords(seg) : seg}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function checkAISignalConsistency(aiSentiment, quantConclusion) {
   if (!aiSentiment || !quantConclusion) return null;
   const quantDir = quantConclusion.includes('偏多') ? '偏多' : quantConclusion.includes('偏空') ? '偏空' : '中性';
@@ -3051,13 +3114,12 @@ function StockAnalyzer() {
 
           <div style={{ marginTop: 16, background: COLORS.cardRaised, borderRadius: 10, padding: '12px 14px' }}>
             <div style={{ fontSize: 12, color: COLORS.gold, fontWeight: 700, marginBottom: 6 }}>AI分析(含短期展望)</div>
+            <div style={{ fontSize: 10.5, color: COLORS.textMuted, marginBottom: 6, lineHeight: 1.6 }}>🎨<span style={{ color: COLORS.orange }}>橘=警語</span>、<span style={{ color: COLORS.up }}>紅=偏多/好</span>、<span style={{ color: COLORS.down }}>綠=偏空/不好</span>、灰=資料提醒;同一句好壞都有時只把關鍵字上色(程式依字面判斷,僅供快速瀏覽)</div>
             {insightLoading && <div style={{ fontSize: 13, color: COLORS.textSecondary }}>AI分析中...</div>}
             {aiInsight && !insightLoading && (
               <>
                 <div style={{ fontSize: 13, lineHeight: 1.9, color: COLORS.textPrimary }}>
-                  {aiInsight.analysis.split('▲').map((seg, i) => (
-                    <div key={i} style={{ marginBottom: 6 }}>{seg.trim()}</div>
-                  ))}
+                  <AiToneSegments analysis={aiInsight.analysis} />
                 </div>
                 {(() => {
                   const warning = checkAISignalConsistency(aiInsight.sentiment, result.conclusion);
